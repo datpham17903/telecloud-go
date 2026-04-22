@@ -1,0 +1,94 @@
+package database
+
+import (
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+	_ "modernc.org/sqlite"
+)
+
+type File struct {
+	ID         int       `db:"id" json:"id"`
+	MessageID  *int      `db:"message_id" json:"message_id"`
+	Filename   string    `db:"filename" json:"filename"`
+	Path       string    `db:"path" json:"path"`
+	Size       int64     `db:"size" json:"size"`
+	MimeType   *string   `db:"mime_type" json:"mime_type"`
+	ShareToken *string   `db:"share_token" json:"share_token"`
+	IsFolder   bool      `db:"is_folder" json:"is_folder"`
+	ThumbPath  *string   `db:"thumb_path" json:"thumb_path"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+	
+	// Virtual fields
+	DirectToken string `db:"-" json:"direct_token,omitempty"`
+	HasThumb    bool   `db:"-" json:"has_thumb"`
+}
+
+var DB *sqlx.DB
+
+func InitDB(dbPath string) {
+	var err error
+	DB, err = sqlx.Connect("sqlite", dbPath)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	schema := `
+	CREATE TABLE IF NOT EXISTS files (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		message_id INTEGER,
+		filename TEXT NOT NULL,
+		path TEXT DEFAULT '/',
+		size INTEGER DEFAULT 0,
+		mime_type TEXT,
+		share_token TEXT UNIQUE,
+		is_folder BOOLEAN DEFAULT 0,
+		thumb_path TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+	_, err = DB.Exec(schema)
+	if err != nil {
+		log.Fatalf("Failed to create schema: %v", err)
+	}
+}
+
+func GetUniqueFilename(path, filename string, isFolder bool) string {
+	if filename == "" {
+		return "unnamed"
+	}
+
+	finalName := filename
+	counter := 1
+
+	for {
+		var id int
+		err := DB.Get(&id, "SELECT id FROM files WHERE path = ? AND filename = ? LIMIT 1", path, finalName)
+		if err != nil { // Not found or error
+			break
+		}
+
+		if isFolder {
+			finalName = fmt.Sprintf("%s (%d)", filename, counter)
+		} else {
+			dotIndex := -1
+			for i := len(filename) - 1; i >= 0; i-- {
+				if filename[i] == '.' {
+					dotIndex = i
+					break
+				}
+			}
+			if dotIndex == -1 {
+				finalName = fmt.Sprintf("%s (%d)", filename, counter)
+			} else {
+				name := filename[:dotIndex]
+				ext := filename[dotIndex:]
+				finalName = fmt.Sprintf("%s (%d)%s", name, counter, ext)
+			}
+		}
+		counter++
+	}
+	return finalName
+}

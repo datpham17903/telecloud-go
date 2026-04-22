@@ -1,0 +1,46 @@
+# Binaries and executables
+/telecloud
+/telecloud.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+dist/
+
+# Environment and Secrets
+.env
+session.json
+
+# Database and data
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Media and Generated Assets
+static/thumbs/*
+!static/thumbs/.gitkeep
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go dependencies and temporary files
+vendor/
+go.sum
+# Note: It's generally recommended to keep go.sum, but some prefer to ignore it. 
+# In this project, we'll keep go.sum for stability. 
+# Removing go.sum from ignore list:
+#!go.sum
