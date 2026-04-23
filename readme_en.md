@@ -83,7 +83,6 @@ Main fields in `.env`:
 * `DATABASE_PATH`: Path to the database file
 * `THUMBS_DIR`: Directory for storing thumbnails
 * `WEBDAV_ENABLED`: Enable/Disable WebDAV server (`true` or `false`)
-* `WEBDAV_PORT`: Port for the WebDAV server (e.g., `8080`)
 * `WEBDAV_USER`: WebDAV username
 * `WEBDAV_PASSWORD`: WebDAV password
 
@@ -151,8 +150,8 @@ Enter your phone number, OTP, and 2FA password (if any).
 ./telecloud
 ```
 
-Access the web interface at:
-`http://localhost:8091`
+Access the web interface at: `http://localhost:8091`
+WebDAV at: `http://localhost:8091/webdav`
 
 ---
 

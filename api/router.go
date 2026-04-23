@@ -15,6 +15,7 @@ import (
 	"telecloud/database"
 	"telecloud/tgclient"
 	"telecloud/utils"
+	"telecloud/webdav"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -48,6 +49,11 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 			}
 			c.Next()
 		}
+	}
+
+	// WebDAV Route
+	if cfg.WebdavEnabled {
+		r.Any("/webdav/*path", gin.WrapH(webdav.NewHandler(cfg)))
 	}
 
 	r.GET("/", func(c *gin.Context) {

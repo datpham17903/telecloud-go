@@ -74,7 +74,6 @@ Nội dung chính trong tệp `.env`:
 *   `DATABASE_PATH`: Đường dẫn tới file database.
 *   `THUMBS_DIR`: Đường dẫn tới thư mục chứa ảnh thumbnail.
 *   `WEBDAV_ENABLED`: Bật/Tắt server WebDAV (`true` hoặc `false`).
-*   `WEBDAV_PORT`: Cổng chạy server WebDAV (ví dụ: `8080`).
 *   `WEBDAV_USER`: Tên đăng nhập WebDAV.
 *   `WEBDAV_PASSWORD`: Mật khẩu WebDAV.
 
@@ -130,6 +129,7 @@ telecloud.exe -auth
 ```
 
 Truy cập giao diện web tại: `http://localhost:8091`
+WebDAV tại: `http://localhost:8091/webdav`
 
 ---
 

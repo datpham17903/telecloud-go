@@ -10,11 +10,12 @@ import (
 	"golang.org/x/net/webdav"
 )
 
-func StartServer(cfg *config.Config) {
+func NewHandler(cfg *config.Config) http.Handler {
 	fs := NewTelecloudFS(cfg)
 	ls := webdav.NewMemLS()
 
 	handler := &webdav.Handler{
+		Prefix:     "/webdav",
 		FileSystem: fs,
 		LockSystem: ls,
 		Logger: func(r *http.Request, err error) {
@@ -26,8 +27,7 @@ func StartServer(cfg *config.Config) {
 		},
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != cfg.WebdavUser || pass != cfg.WebdavPassword {
 			w.Header().Set("WWW-Authenticate", `Basic realm="TeleCloud WebDAV"`)
@@ -41,16 +41,11 @@ func StartServer(cfg *config.Config) {
 		}
 
 		// Handle macOS Finder specific garbage
-		if strings.HasPrefix(r.URL.Path, "/._") || strings.HasPrefix(r.URL.Path, "/.DS_Store") {
+		if strings.HasPrefix(r.URL.Path, "/webdav/._") || strings.HasPrefix(r.URL.Path, "/webdav/.DS_Store") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 
 		handler.ServeHTTP(w, r)
 	})
-
-	log.Printf("Starting WebDAV server on port %s...", cfg.WebdavPort)
-	if err := http.ListenAndServe(":"+cfg.WebdavPort, mux); err != nil {
-		log.Fatalf("WebDAV server failed: %v", err)
-	}
 }
