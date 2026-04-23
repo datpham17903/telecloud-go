@@ -143,13 +143,17 @@ Nếu bạn muốn tự biên dịch dự án, hãy làm theo các bước sau:
 4. Chạy lệnh `go mod tidy` để tải về các thư viện cần thiết.
 
 5. Build giao diện (Tailwind CSS):
-   ```bash
-   curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-x64
-   chmod +x tailwindcss-linux-x64
-   mv tailwindcss-linux-x64 tailwindcss
-   chmod +x build-css.sh
-   ./build-css.sh
-   ```
+   * Tải **Tailwind CLI** phù hợp với hệ điều hành của bạn tại [Tailwind CSS Releases](https://github.com/tailwindlabs/tailwindcss/releases/latest).
+   * Đổi tên file vừa tải thành `tailwindcss` (hoặc `tailwindcss.exe` trên Windows) và đặt vào thư mục gốc của dự án.
+   * Chạy lệnh build:
+     ```bash
+     # Linux/macOS
+     chmod +x build-css.sh
+     ./build-css.sh
+
+     # Windows
+     build-css.bat
+     ```
 
 6.  Chạy trực tiếp: `go run .`
 

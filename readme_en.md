@@ -172,14 +172,17 @@ go mod tidy
 ```
 
 5. Build UI (Tailwind CSS):
+   * Download the **Tailwind CLI** for your OS from [Tailwind CSS Releases](https://github.com/tailwindlabs/tailwindcss/releases/latest).
+   * Rename the downloaded file to `tailwindcss` (or `tailwindcss.exe` on Windows) and place it in the project root.
+   * Run the build command:
+     ```bash
+     # Linux/macOS
+     chmod +x build-css.sh
+     ./build-css.sh
 
-```bash
-curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-x64
-chmod +x tailwindcss-linux-x64
-mv tailwindcss-linux-x64 tailwindcss
-chmod +x build-css.sh
-./build-css.sh
-```
+     # Windows
+     build-css.bat
+     ```
 
 6. Run:
 
