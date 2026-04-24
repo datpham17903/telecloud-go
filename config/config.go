@@ -22,6 +22,7 @@ type Config struct {
 	WebdavUser      string
 	WebdavPassword  string
 	TempDir         string
+	ProxyURL        string
 	Version         string
 }
 
@@ -56,6 +57,7 @@ func Load() *Config {
 		WebdavUser:      getEnv("WEBDAV_USER", "admin"),
 		WebdavPassword:  getEnv("WEBDAV_PASSWORD", "your_secure_password"),
 		TempDir:         getEnv("TEMP_DIR", os.TempDir()+"/telecloud_temp_chunks"),
+		ProxyURL:        getEnv("PROXY_URL", ""),
 	}
 }
 

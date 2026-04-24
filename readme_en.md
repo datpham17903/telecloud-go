@@ -80,9 +80,10 @@ Main fields in `.env`:
 * `ADMIN_PASSWORD`: Password to access the web interface
 * `PORT`: Port to run the application
 * `MAX_UPLOAD_SIZE_MB`: Maximum upload file size (Premium accounts can go up to 4096MB)
-* `DATABASE_PATH`: Path to the database file
-* `THUMBS_DIR`: Directory for storing thumbnails
-* `TEMP_DIR`: Path to the temporary directory for storing file chunks during the upload process
+* `DATABASE_PATH`: (Optional) Path to the database file (default: `database.db`)
+* `THUMBS_DIR`: (Optional) Directory for storing thumbnails (default: `./static/thumbs`)
+* `TEMP_DIR`: (Optional) Path to the temporary directory for storing file chunks during the upload process (default: `./temp`)
+* `PROXY_URL`: (Optional) Proxy to connect MTProto, supports HTTP and SOCKS5 (e.g. `socks5://127.0.0.1:1080`)
 * `WEBDAV_ENABLED`: Enable/Disable WebDAV server (`true` or `false`)
 * `WEBDAV_USER`: WebDAV username
 * `WEBDAV_PASSWORD`: WebDAV password

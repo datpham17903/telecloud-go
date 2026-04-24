@@ -28,6 +28,7 @@ type PasteRequest struct {
 }
 
 func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.SetTrustedProxies(nil)
 	

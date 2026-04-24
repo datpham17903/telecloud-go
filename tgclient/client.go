@@ -5,9 +5,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 
+	"golang.org/x/net/proxy"
 	"golang.org/x/term"
 
 	"telecloud/config"
@@ -15,6 +18,7 @@ import (
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
 )
 
@@ -65,6 +69,28 @@ func InitClient(cfg *config.Config, runAuthFlow bool) error {
 		SessionStorage: &session.FileStorage{
 			Path: sessionDir,
 		},
+	}
+
+	if cfg.ProxyURL != "" {
+		u, err := url.Parse(cfg.ProxyURL)
+		if err != nil {
+			return fmt.Errorf("invalid PROXY_URL: %v", err)
+		}
+
+		dialer, err := proxy.FromURL(u, proxy.Direct)
+		if err != nil {
+			return fmt.Errorf("failed to create proxy dialer: %v", err)
+		}
+
+		options.Resolver = dcs.Plain(dcs.PlainOptions{
+			Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if d, ok := dialer.(proxy.ContextDialer); ok {
+					return d.DialContext(ctx, network, addr)
+				}
+				return dialer.Dial(network, addr)
+			},
+		})
+		log.Printf("Using proxy: %s", cfg.ProxyURL)
 	}
 
 	// Userbot mode
