@@ -138,13 +138,26 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
             }
         },
         async checkUpdate() {
+            const compareVersions = (v1, v2) => {
+                const p1 = (v1 || 'v0.0.0').replace(/^v/, '').split('.').map(Number);
+                const p2 = (v2 || 'v0.0.0').replace(/^v/, '').split('.').map(Number);
+                for (let i = 0; i < Math.max(p1.length, p2.length); i++) {
+                    const n1 = p1[i] || 0;
+                    const n2 = p2[i] || 0;
+                    if (n1 > n2) return 1;
+                    if (n1 < n2) return -1;
+                }
+                return 0;
+            };
+
             try {
                 const res = await fetch('https://api.github.com/repos/dabeecao/telecloud-go/releases/latest');
                 if (res.ok) {
                     const data = await res.json();
                     const latestVersion = data.tag_name;
                     const currentVersion = TeleCloud.version || 'v1.0.0';
-                    if (latestVersion && latestVersion !== currentVersion) {
+                    
+                    if (latestVersion && compareVersions(latestVersion, currentVersion) === 1) {
                         const confirmed = await this.customConfirm(this.t('update_title'), this.t('update_msg') + ` (${latestVersion})`, false);
                         if (confirmed) window.open(data.html_url, '_blank');
                     }
