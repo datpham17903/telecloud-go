@@ -3,31 +3,93 @@
 # ==========================================
 # 1. TỰ ĐỘNG NHẬN DIỆN MÔI TRƯỜNG & BIẾN
 # ==========================================
+
+# Hàm phát hiện package manager dựa vào /etc/os-release và lệnh có sẵn
+detect_pkg_manager() {
+    if command -v apt &>/dev/null; then
+        PKG_MGR="apt"
+    elif command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+    elif command -v yum &>/dev/null; then
+        PKG_MGR="yum"
+    elif command -v pacman &>/dev/null; then
+        PKG_MGR="pacman"
+    elif command -v apk &>/dev/null; then
+        PKG_MGR="apk"
+    elif command -v zypper &>/dev/null; then
+        PKG_MGR="zypper"
+    elif command -v brew &>/dev/null; then
+        PKG_MGR="brew"
+    else
+        echo "[!] Không nhận diện được trình quản lý gói. Hỗ trợ: apt, dnf, yum, pacman, apk, zypper, brew."
+        exit 1
+    fi
+
+    # Đọc tên distro để thông báo
+    DISTRO_NAME="Linux"
+    if [ "$(uname -s)" == "Darwin" ]; then
+        DISTRO_NAME="macOS $(sw_vers -productVersion)"
+    elif [ -f /etc/os-release ]; then
+        DISTRO_NAME=$(. /etc/os-release && echo "${PRETTY_NAME:-$NAME}")
+    fi
+    echo "[+] Hệ điều hành: $DISTRO_NAME (Package manager: $PKG_MGR)"
+}
+
+# Hàm cài một gói, bỏ qua nếu đã có
+pkg_install() {
+    local pkg="$1"
+    # Chuẩn hoá tên lệnh để kiểm tra (một số gói có tên lệnh khác tên gói)
+    local cmd="${2:-$pkg}"
+    if command -v "$cmd" &>/dev/null; then
+        echo "[✓] $pkg đã được cài sẵn, bỏ qua."
+        return 0
+    fi
+    echo "[+] Đang cài đặt $pkg..."
+    case "$PKG_MGR" in
+        apt)     apt install -y "$pkg" ;;
+        dnf)     dnf install -y "$pkg" ;;
+        yum)     yum install -y "$pkg" ;;
+        pacman)  pacman -S --noconfirm "$pkg" ;;
+        apk)     apk add --no-cache "$pkg" ;;
+        zypper)  zypper install -y "$pkg" ;;
+        brew)    brew install "$pkg" ;;
+    esac
+}
+
 if [ -n "$PREFIX" ] && echo "$PREFIX" | grep -q "termux"; then
     OS_TYPE="termux"
     BASE_DIR="$HOME/telecloud-go"
     BIN_DIR="$PREFIX/bin"
-    PKG_MGR="pkg install -y"
+    PKG_MGR="pkg"
+    echo "[+] Hệ điều hành: Termux (Android)"
+elif [ "$(uname -s)" == "Darwin" ]; then
+    OS_TYPE="macos"
+    BASE_DIR="$HOME/telecloud-go"
+    BIN_DIR="/usr/local/bin"
+    if ! command -v brew &>/dev/null; then
+        echo "[!] Homebrew chưa được cài đặt. Vui lòng cài trước:"
+        echo "    /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+        exit 1
+    fi
+    PKG_MGR="brew"
+    echo "[+] Hệ điều hành: macOS $(sw_vers -productVersion) (Package manager: brew)"
 else
     OS_TYPE="linux"
     BASE_DIR="/opt/telecloud-go"
     BIN_DIR="/usr/local/bin"
-    
+
     if [ "$EUID" -ne 0 ]; then
         echo "[!] Môi trường Linux yêu cầu chạy bằng quyền root (sudo). Vui lòng thử lại!"
         exit 1
     fi
 
-    if command -v apt &> /dev/null; then
-        apt update
-        PKG_MGR="apt install -y"
-    elif command -v dnf &> /dev/null; then
-        PKG_MGR="dnf install -y"
-    elif command -v yum &> /dev/null; then
-        PKG_MGR="yum install -y"
-    else
-        echo "[!] Không hỗ trợ trình quản lý gói của OS này."
-        exit 1
+    detect_pkg_manager
+
+    # Cập nhật danh sách gói (chỉ với apt)
+    if [ "$PKG_MGR" == "apt" ]; then
+        apt update -qq
+    elif [ "$PKG_MGR" == "pacman" ]; then
+        pacman -Sy --noconfirm
     fi
 fi
 
@@ -38,43 +100,66 @@ SESSION="telecloud"
 # ========================
 install_dependencies() {
     echo "[+] Đang kiểm tra và cài đặt các gói cần thiết..."
-    echo "[!] Lưu ý: FFmpeg chỉ dùng để tạo ảnh thu nhỏ (thumbnail) cho video/audio."
-    echo "[!] Trên các dòng chip Exynos hoặc thiết bị yếu, FFmpeg có thể gây lỗi hoặc treo máy."
-    read -p "[?] Bạn có muốn cài đặt FFmpeg không? (y/n): " install_ffmpeg
 
     if [ "$OS_TYPE" == "linux" ]; then
-        PACKAGES="curl wget tar unzip jq tmux nano"
-        [ "$install_ffmpeg" == "y" ] && PACKAGES="$PACKAGES ffmpeg"
-        $PKG_MGR $PACKAGES
+        # Cài lần lượt, bỏ qua gói đã có
+        for pkg in curl wget tar unzip jq tmux nano; do
+            pkg_install "$pkg"
+        done
 
-        if ! command -v cloudflared &> /dev/null; then
+        echo ""
+        echo "[!] Lưu ý: FFmpeg chỉ dùng để tạo ảnh thu nhỏ (thumbnail) cho video/audio."
+        echo "[!] Trên các dòng chip Exynos hoặc thiết bị yếu, FFmpeg có thể gây lỗi hoặc treo máy."
+        read -p "[?] Bạn có muốn cài đặt FFmpeg không? (y/n): " install_ffmpeg
+        [ "$install_ffmpeg" == "y" ] && pkg_install "ffmpeg"
+
+        # Cài Cloudflared nếu chưa có
+        if ! command -v cloudflared &>/dev/null; then
             echo "[+] Đang cài đặt Cloudflared..."
-
-            ARCH=$(uname -m)
-            case "$ARCH" in
-                x86_64) ARCH="amd64" ;;
-                aarch64|arm64) ARCH="arm64" ;;
-                *) 
-                    echo "[!] Kiến trúc không hỗ trợ: $ARCH"
-                    return 1
-                ;;
-            esac
-
-            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
-
-            wget -qO /usr/local/bin/cloudflared "$URL" || return 1
-            chmod +x /usr/local/bin/cloudflared
-
+            if [ "$OS_TYPE" == "macos" ]; then
+                brew install cloudflared || { echo "[!] Cài cloudflared qua brew thất bại!"; return 1; }
+            else
+                ARCH=$(uname -m)
+                case "$ARCH" in
+                    x86_64)          ARCH="amd64" ;;
+                    aarch64|arm64)   ARCH="arm64" ;;
+                    armv7l|armhf)    ARCH="armv7" ;;
+                    *)
+                        echo "[!] Kiến trúc không hỗ trợ để tải Cloudflared: $ARCH"
+                        return 1
+                    ;;
+                esac
+                CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
+                # Fallback: thử wget trước, nếu không có dùng curl
+                if command -v wget &>/dev/null; then
+                    wget -qO /usr/local/bin/cloudflared "$CF_URL" || { echo "[!] Tải cloudflared thất bại!"; return 1; }
+                elif command -v curl &>/dev/null; then
+                    curl -fsSL "$CF_URL" -o /usr/local/bin/cloudflared || { echo "[!] Tải cloudflared thất bại!"; return 1; }
+                else
+                    echo "[!] Cần wget hoặc curl để tải Cloudflared!"; return 1
+                fi
+                chmod +x /usr/local/bin/cloudflared
+            fi
             echo "[+] Cloudflared đã cài xong!"
+        else
+            echo "[✓] cloudflared đã được cài sẵn, bỏ qua."
         fi
     else
+        # Termux
+        echo ""
+        echo "[!] Lưu ý: FFmpeg chỉ dùng để tạo ảnh thu nhỏ (thumbnail) cho video/audio."
+        echo "[!] Trên các dòng chip Exynos hoặc thiết bị yếu, FFmpeg có thể gây lỗi hoặc treo máy."
+        read -p "[?] Bạn có muốn cài đặt FFmpeg không? (y/n): " install_ffmpeg
+
         MAIN_PACKAGES="wget curl tar unzip tmux cloudflared jq nano"
         [ "$install_ffmpeg" == "y" ] && MAIN_PACKAGES="$MAIN_PACKAGES ffmpeg"
-        
+
         for pkg in $MAIN_PACKAGES; do
-            if ! command -v "$pkg" &> /dev/null; then
+            if ! command -v "$pkg" &>/dev/null; then
                 echo "[+] Cài đặt $pkg..."
-                $PKG_MGR $pkg || return 1
+                pkg install -y "$pkg" || return 1
+            else
+                echo "[✓] $pkg đã được cài sẵn, bỏ qua."
             fi
         done
     fi
@@ -98,12 +183,16 @@ download_telecloud() {
         TARGET="arm64"
     elif [[ "$TARGET" == "x86_64" ]]; then
         TARGET="amd64"
+    elif [[ "$TARGET" == "armv7l" || "$TARGET" == "armhf" ]]; then
+        TARGET="armv7"
     fi
 
     if [ "$TARGET" == "arm64" ]; then
         URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_arm64")) | .browser_download_url')
     elif [ "$TARGET" == "amd64" ]; then
         URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_amd64") or contains("linux_x86_64")) | .browser_download_url')
+    elif [ "$TARGET" == "armv7" ]; then
+        URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_armv7")) | .browser_download_url')
     fi
 
     if [ -z "$URL" ] || [ "$URL" == "null" ]; then
@@ -232,10 +321,13 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
     else
-        # Cấu hình Tmux cho Termux
+        # Cấu hình Tmux cho Termux / macOS
+        WAKELOCK=""
+        [ "$OS_TYPE" == "termux" ] && WAKELOCK="termux-wake-lock"
+
         cat > "$BASE_DIR/run.sh" <<EOF
 #!/bin/bash
-termux-wake-lock
+$WAKELOCK
 while true; do
     ./telecloud >> "$BASE_DIR/app.log" 2>&1
     sleep 3
@@ -245,7 +337,7 @@ EOF
 
         cat > "$BASE_DIR/run-cloudflared.sh" <<EOF
 #!/bin/bash
-termux-wake-lock
+$WAKELOCK
 while true; do
     cloudflared tunnel run --url http://localhost:$APP_PORT telecloud-tunnel >> "$BASE_DIR/tunnel.log" 2>&1
     sleep 3
@@ -264,6 +356,9 @@ create_menu() {
 
 if [ -n "$PREFIX" ] && echo "$PREFIX" | grep -q "termux"; then
     OS_TYPE="termux"
+    BASE_DIR="$HOME/telecloud-go"
+elif [ "$(uname -s)" == "Darwin" ]; then
+    OS_TYPE="macos"
     BASE_DIR="$HOME/telecloud-go"
 else
     OS_TYPE="linux"
@@ -310,6 +405,12 @@ check_status() {
 }
 
 start_app() {
+    if [ ! -f "$BASE_DIR/session.json" ]; then
+        echo "❌ LỖI: Bạn chưa đăng nhập Telegram!"
+        echo "Vui lòng chọn Mục 8: 'Các lệnh của Telecloud' -> 'Đăng nhập lần đầu' trước."
+        return 1
+    fi
+
     echo "[+] Đang khởi động ứng dụng..."
     if [ "$OS_TYPE" == "linux" ]; then
         systemctl enable --now telecloud
@@ -462,12 +563,16 @@ update_app() {
         TARGET="arm64"
     elif [[ "$TARGET" == "x86_64" ]]; then
         TARGET="amd64"
+    elif [[ "$TARGET" == "armv7l" || "$TARGET" == "armhf" ]]; then
+        TARGET="armv7"
     fi
     
     if [ "$TARGET" == "arm64" ]; then
         URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_arm64")) | .browser_download_url')
     elif [ "$TARGET" == "amd64" ]; then
         URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_amd64") or contains("linux_x86_64")) | .browser_download_url')
+    elif [ "$TARGET" == "armv7" ]; then
+        URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_armv7")) | .browser_download_url')
     fi
 
     if [ -z "$URL" ] || [ "$URL" == "null" ]; then
@@ -604,7 +709,7 @@ if [ ! -f "$BASE_DIR/telecloud" ]; then
     echo "Gõ lệnh sau để mở Menu Quản lý:"
     echo "   telecloud"
     echo ""
-    echo "Trong Menu, hãy chọn Mục 7: 'Các lệnh của Telecloud' -> 'Đăng nhập lần đầu' để thiết lập nhé!"
+    echo "Trong Menu, hãy chọn Mục 8: 'Các lệnh của Telecloud' -> 'Đăng nhập lần đầu' để thiết lập nhé!"
     echo "============================================="
     exit 0
 fi

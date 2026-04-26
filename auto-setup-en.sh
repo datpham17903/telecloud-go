@@ -3,31 +3,92 @@
 # ==========================================
 # 1. AUTO DETECT ENVIRONMENT & VARIABLES
 # ==========================================
+
+# Detect package manager using /etc/os-release and available commands
+detect_pkg_manager() {
+    if command -v apt &>/dev/null; then
+        PKG_MGR="apt"
+    elif command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+    elif command -v yum &>/dev/null; then
+        PKG_MGR="yum"
+    elif command -v pacman &>/dev/null; then
+        PKG_MGR="pacman"
+    elif command -v apk &>/dev/null; then
+        PKG_MGR="apk"
+    elif command -v zypper &>/dev/null; then
+        PKG_MGR="zypper"
+    elif command -v brew &>/dev/null; then
+        PKG_MGR="brew"
+    else
+        echo "[!] Cannot detect package manager. Supported: apt, dnf, yum, pacman, apk, zypper, brew."
+        exit 1
+    fi
+
+    # Read distro name for display
+    DISTRO_NAME="Linux"
+    if [ "$(uname -s)" == "Darwin" ]; then
+        DISTRO_NAME="macOS $(sw_vers -productVersion)"
+    elif [ -f /etc/os-release ]; then
+        DISTRO_NAME=$(. /etc/os-release && echo "${PRETTY_NAME:-$NAME}")
+    fi
+    echo "[+] Operating System: $DISTRO_NAME (Package manager: $PKG_MGR)"
+}
+
+# Install a single package, skip if already installed
+pkg_install() {
+    local pkg="$1"
+    local cmd="${2:-$pkg}"
+    if command -v "$cmd" &>/dev/null; then
+        echo "[✓] $pkg is already installed, skipping."
+        return 0
+    fi
+    echo "[+] Installing $pkg..."
+    case "$PKG_MGR" in
+        apt)     apt install -y "$pkg" ;;
+        dnf)     dnf install -y "$pkg" ;;
+        yum)     yum install -y "$pkg" ;;
+        pacman)  pacman -S --noconfirm "$pkg" ;;
+        apk)     apk add --no-cache "$pkg" ;;
+        zypper)  zypper install -y "$pkg" ;;
+        brew)    brew install "$pkg" ;;
+    esac
+}
+
 if [ -n "$PREFIX" ] && echo "$PREFIX" | grep -q "termux"; then
     OS_TYPE="termux"
     BASE_DIR="$HOME/telecloud-go"
     BIN_DIR="$PREFIX/bin"
-    PKG_MGR="pkg install -y"
+    PKG_MGR="pkg"
+    echo "[+] Operating System: Termux (Android)"
+elif [ "$(uname -s)" == "Darwin" ]; then
+    OS_TYPE="macos"
+    BASE_DIR="$HOME/telecloud-go"
+    BIN_DIR="/usr/local/bin"
+    if ! command -v brew &>/dev/null; then
+        echo "[!] Homebrew is not installed. Please install it first:"
+        echo "    /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+        exit 1
+    fi
+    PKG_MGR="brew"
+    echo "[+] Operating System: macOS $(sw_vers -productVersion) (Package manager: brew)"
 else
     OS_TYPE="linux"
     BASE_DIR="/opt/telecloud-go"
     BIN_DIR="/usr/local/bin"
-    
+
     if [ "$EUID" -ne 0 ]; then
         echo "[!] Linux environment requires root privileges (sudo). Please try again!"
         exit 1
     fi
 
-    if command -v apt &> /dev/null; then
-        apt update
-        PKG_MGR="apt install -y"
-    elif command -v dnf &> /dev/null; then
-        PKG_MGR="dnf install -y"
-    elif command -v yum &> /dev/null; then
-        PKG_MGR="yum install -y"
-    else
-        echo "[!] OS package manager not supported."
-        exit 1
+    detect_pkg_manager
+
+    # Update package lists (apt and pacman only)
+    if [ "$PKG_MGR" == "apt" ]; then
+        apt update -qq
+    elif [ "$PKG_MGR" == "pacman" ]; then
+        pacman -Sy --noconfirm
     fi
 fi
 
@@ -38,43 +99,66 @@ SESSION="telecloud"
 # ========================
 install_dependencies() {
     echo "[+] Checking and installing required packages..."
-    echo "[!] Note: FFmpeg is only used to create thumbnails for video/audio."
-    echo "[!] On Exynos chips or weak devices, FFmpeg may cause errors or system hangs."
-    read -p "[?] Do you want to install FFmpeg? (y/n): " install_ffmpeg
 
     if [ "$OS_TYPE" == "linux" ]; then
-        PACKAGES="curl wget tar unzip jq tmux nano"
-        [ "$install_ffmpeg" == "y" ] && PACKAGES="$PACKAGES ffmpeg"
-        $PKG_MGR $PACKAGES
+        # Install base packages one by one, skipping already-installed ones
+        for pkg in curl wget tar unzip jq tmux nano; do
+            pkg_install "$pkg"
+        done
 
-        if ! command -v cloudflared &> /dev/null; then
+        echo ""
+        echo "[!] Note: FFmpeg is only used to generate video/audio thumbnails."
+        echo "[!] On Exynos chips or weak devices, FFmpeg may cause errors or system hangs."
+        read -p "[?] Do you want to install FFmpeg? (y/n): " install_ffmpeg
+        [ "$install_ffmpeg" == "y" ] && pkg_install "ffmpeg"
+
+        # Install Cloudflared if not present
+        if ! command -v cloudflared &>/dev/null; then
             echo "[+] Installing Cloudflared..."
-
-            ARCH=$(uname -m)
-            case "$ARCH" in
-                x86_64) ARCH="amd64" ;;
-                aarch64|arm64) ARCH="arm64" ;;
-                *) 
-                    echo "[!] Architecture not supported: $ARCH"
-                    return 1
-                ;;
-            esac
-
-            URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
-
-            wget -qO /usr/local/bin/cloudflared "$URL" || return 1
-            chmod +x /usr/local/bin/cloudflared
-
+            if [ "$OS_TYPE" == "macos" ]; then
+                brew install cloudflared || { echo "[!] Failed to install cloudflared via brew!"; return 1; }
+            else
+                ARCH=$(uname -m)
+                case "$ARCH" in
+                    x86_64)        ARCH="amd64" ;;
+                    aarch64|arm64) ARCH="arm64" ;;
+                    armv7l|armhf)  ARCH="armv7" ;;
+                    *)
+                        echo "[!] Unsupported architecture for Cloudflared: $ARCH"
+                        return 1
+                    ;;
+                esac
+                CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
+                # Try wget first, fallback to curl
+                if command -v wget &>/dev/null; then
+                    wget -qO /usr/local/bin/cloudflared "$CF_URL" || { echo "[!] Failed to download cloudflared!"; return 1; }
+                elif command -v curl &>/dev/null; then
+                    curl -fsSL "$CF_URL" -o /usr/local/bin/cloudflared || { echo "[!] Failed to download cloudflared!"; return 1; }
+                else
+                    echo "[!] wget or curl is required to download Cloudflared!"; return 1
+                fi
+                chmod +x /usr/local/bin/cloudflared
+            fi
             echo "[+] Cloudflared installed successfully!"
+        else
+            echo "[✓] cloudflared is already installed, skipping."
         fi
     else
+        # Termux
+        echo ""
+        echo "[!] Note: FFmpeg is only used to generate video/audio thumbnails."
+        echo "[!] On Exynos chips or weak devices, FFmpeg may cause errors or system hangs."
+        read -p "[?] Do you want to install FFmpeg? (y/n): " install_ffmpeg
+
         MAIN_PACKAGES="wget curl tar unzip tmux cloudflared jq nano"
         [ "$install_ffmpeg" == "y" ] && MAIN_PACKAGES="$MAIN_PACKAGES ffmpeg"
 
         for pkg in $MAIN_PACKAGES; do
-            if ! command -v "$pkg" &> /dev/null; then
+            if ! command -v "$pkg" &>/dev/null; then
                 echo "[+] Installing $pkg..."
-                $PKG_MGR $pkg || return 1
+                pkg install -y "$pkg" || return 1
+            else
+                echo "[✓] $pkg is already installed, skipping."
             fi
         done
     fi
@@ -98,12 +182,16 @@ download_telecloud() {
         TARGET="arm64"
     elif [[ "$TARGET" == "x86_64" ]]; then
         TARGET="amd64"
+    elif [[ "$TARGET" == "armv7l" || "$TARGET" == "armhf" ]]; then
+        TARGET="armv7"
     fi
 
     if [ "$TARGET" == "arm64" ]; then
         URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_arm64")) | .browser_download_url')
     elif [ "$TARGET" == "amd64" ]; then
         URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_amd64") or contains("linux_x86_64")) | .browser_download_url')
+    elif [ "$TARGET" == "armv7" ]; then
+        URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_armv7")) | .browser_download_url')
     fi
 
     if [ -z "$URL" ] || [ "$URL" == "null" ]; then
@@ -232,10 +320,14 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
     else
-        # Configure Tmux for Termux
+        # Configure Tmux for Termux / macOS
+        # Termux needs wake-lock; macOS/others skip it
+        WAKELOCK=""
+        [ "$OS_TYPE" == "termux" ] && WAKELOCK="termux-wake-lock"
+
         cat > "$BASE_DIR/run.sh" <<EOF
 #!/bin/bash
-termux-wake-lock
+$WAKELOCK
 while true; do
     ./telecloud >> "$BASE_DIR/app.log" 2>&1
     sleep 3
@@ -245,7 +337,7 @@ EOF
 
         cat > "$BASE_DIR/run-cloudflared.sh" <<EOF
 #!/bin/bash
-termux-wake-lock
+$WAKELOCK
 while true; do
     cloudflared tunnel run --url http://localhost:$APP_PORT telecloud-tunnel >> "$BASE_DIR/tunnel.log" 2>&1
     sleep 3
@@ -264,6 +356,9 @@ create_menu() {
 
 if [ -n "$PREFIX" ] && echo "$PREFIX" | grep -q "termux"; then
     OS_TYPE="termux"
+    BASE_DIR="$HOME/telecloud-go"
+elif [ "$(uname -s)" == "Darwin" ]; then
+    OS_TYPE="macos"
     BASE_DIR="$HOME/telecloud-go"
 else
     OS_TYPE="linux"
@@ -296,6 +391,7 @@ check_status() {
         systemctl is-active --quiet telecloud && echo "✅ Telecloud App    : Running" || echo "❌ Telecloud App    : Stopped"
         systemctl is-active --quiet telecloud-tunnel && echo "✅ CF Tunnel        : Online" || echo "❌ CF Tunnel        : Offline"
     else
+        # Termux and macOS both use tmux
         tmux has-session -t $SESSION 2>/dev/null && echo "✅ TMUX (Background): Running" || echo "❌ TMUX (Background): Stopped"
         pgrep -f "\./telecloud" > /dev/null && echo "✅ Telecloud App    : Running" || echo "❌ Telecloud App    : Stopped"
         pgrep -f "cloudflared tunnel run" > /dev/null && echo "✅ CF Tunnel        : Online" || echo "❌ CF Tunnel        : Offline"
@@ -310,6 +406,12 @@ check_status() {
 }
 
 start_app() {
+    if [ ! -f "$BASE_DIR/session.json" ]; then
+        echo "❌ ERROR: You are not logged in to Telegram!"
+        echo "Please select Option 8: 'Telecloud Commands' -> 'Initial Login' first."
+        return 1
+    fi
+
     echo "[+] Starting the application..."
     if [ "$OS_TYPE" == "linux" ]; then
         systemctl enable --now telecloud
@@ -368,7 +470,7 @@ manage_tunnel() {
             if [ "$OS_TYPE" == "linux" ]; then
                 systemctl stop telecloud-tunnel 2>/dev/null
                 systemctl disable telecloud-tunnel 2>/dev/null
-            else
+            else  # termux and macos
                 pkill -f "cloudflared tunnel run" 2>/dev/null
             fi
             cloudflared tunnel delete -f telecloud-tunnel 2>/dev/null
@@ -462,12 +564,16 @@ update_app() {
         TARGET="arm64"
     elif [[ "$TARGET" == "x86_64" ]]; then
         TARGET="amd64"
+    elif [[ "$TARGET" == "armv7l" || "$TARGET" == "armhf" ]]; then
+        TARGET="armv7"
     fi
     
     if [ "$TARGET" == "arm64" ]; then
         URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_arm64")) | .browser_download_url')
     elif [ "$TARGET" == "amd64" ]; then
         URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_amd64") or contains("linux_x86_64")) | .browser_download_url')
+    elif [ "$TARGET" == "armv7" ]; then
+        URL=$(echo "$API_DATA" | jq -r '.assets[] | select(.name | contains("linux_armv7")) | .browser_download_url')
     fi
 
     if [ -z "$URL" ] || [ "$URL" == "null" ]; then
@@ -604,7 +710,7 @@ if [ ! -f "$BASE_DIR/telecloud" ]; then
     echo "Type the following command to open the Management Menu:"
     echo "   telecloud"
     echo ""
-    echo "In the Menu, please select Option 7: 'Telecloud Commands' -> 'Initial Login' to set up!"
+    echo "In the Menu, please select Option 8: 'Telecloud Commands' -> 'Initial Login' to set up!"
     echo "============================================="
     exit 0
 fi

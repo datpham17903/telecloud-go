@@ -15,6 +15,9 @@ builds:
     goarch:
       - amd64
       - arm64
+      - arm
+    goarm:
+      - "7"
     binary: telecloud
     main: .
     ldflags:

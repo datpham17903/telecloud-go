@@ -64,10 +64,15 @@ func (termAuth) Code(ctx context.Context, sentCode *tg.AuthSentCode) (string, er
 
 func InitClient(cfg *config.Config, runAuthFlow bool) error {
 	sessionDir := cfg.SessionFile
-	
+
 	options := telegram.Options{
 		SessionStorage: &session.FileStorage{
 			Path: sessionDir,
+		},
+		Device: telegram.DeviceConfig{
+			DeviceModel:   "TeleCloud Server",
+			SystemVersion: "Linux",
+			AppVersion:    cfg.Version,
 		},
 	}
 
@@ -95,7 +100,7 @@ func InitClient(cfg *config.Config, runAuthFlow bool) error {
 
 	// Userbot mode
 	Client = telegram.NewClient(cfg.APIID, cfg.APIHash, options)
-	
+
 	if runAuthFlow {
 		err := Client.Run(context.Background(), func(ctx context.Context) error {
 			flow := auth.NewFlow(
@@ -124,7 +129,7 @@ func Run(ctx context.Context, cfg *config.Config, cb func(ctx context.Context) e
 			return err
 		}
 		if !status.Authorized {
-			log.Fatal("Not authorized. Please run with -auth flag first to login.")
+			return fmt.Errorf("not authorized, please run with -auth flag first to login")
 		}
 		return cb(ctx)
 	})

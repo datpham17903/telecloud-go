@@ -43,7 +43,7 @@ import (
 var contentFS embed.FS
 
 var (
-	version = "v2.2.1"
+	version = "v2.3.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -120,12 +120,14 @@ func main() {
 	}()
 
 	// Wait for shutdown signal or Telegram client to exit
+	var exitCode int
 	select {
 	case sig := <-sigCh:
 		log.Printf("Received signal: %v — initiating graceful shutdown...", sig)
 	case err := <-tgErrCh:
 		if err != nil {
 			log.Printf("Telegram client exited with error: %v", err)
+			exitCode = 1
 		}
 	}
 
@@ -159,4 +161,5 @@ func main() {
 	}
 
 	log.Println("TeleCloud shut down successfully.")
+	os.Exit(exitCode)
 }
