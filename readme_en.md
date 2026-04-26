@@ -42,6 +42,26 @@ This project has been **completely rewritten in Golang** from the original proje
 
 ---
 
+## 🛠️ Automatic Installation (Recommended for Linux/Termux)
+
+This is the simplest and most automated way to install, configure, and manage TeleCloud. The script automatically installs dependencies (FFmpeg, Tmux, Cloudflared...), configures the service, and provides a convenient management menu.
+
+**Usage:**
+```bash
+# Using curl
+bash <(curl -sL https://raw.githubusercontent.com/dabeecao/telecloud-go/main/auto-setup-en.sh)
+
+# Or using wget
+bash <(wget -qO- https://raw.githubusercontent.com/dabeecao/telecloud-go/main/auto-setup-en.sh)
+```
+Or if you have already cloned the repository:
+```bash
+chmod +x auto-setup-en.sh
+./auto-setup-en.sh
+```
+
+---
+
 ## 🚀 Quick Installation Guide (Using Prebuilt Binary)
 
 This is the fastest way to run TeleCloud without installing a development environment.
