@@ -38,9 +38,14 @@ SESSION="telecloud"
 # ========================
 install_dependencies() {
     echo "[+] Checking and installing required packages..."
+    echo "[!] Note: FFmpeg is only used to create thumbnails for video/audio."
+    echo "[!] On Exynos chips or weak devices, FFmpeg may cause errors or system hangs."
+    read -p "[?] Do you want to install FFmpeg? (y/n): " install_ffmpeg
 
     if [ "$OS_TYPE" == "linux" ]; then
-        $PKG_MGR curl wget tar unzip jq ffmpeg tmux nano
+        PACKAGES="curl wget tar unzip jq tmux nano"
+        [ "$install_ffmpeg" == "y" ] && PACKAGES="$PACKAGES ffmpeg"
+        $PKG_MGR $PACKAGES
 
         if ! command -v cloudflared &> /dev/null; then
             echo "[+] Installing Cloudflared..."
@@ -63,7 +68,10 @@ install_dependencies() {
             echo "[+] Cloudflared installed successfully!"
         fi
     else
-        for pkg in wget curl tar unzip tmux cloudflared jq ffmpeg nano; do
+        MAIN_PACKAGES="wget curl tar unzip tmux cloudflared jq nano"
+        [ "$install_ffmpeg" == "y" ] && MAIN_PACKAGES="$MAIN_PACKAGES ffmpeg"
+
+        for pkg in $MAIN_PACKAGES; do
             if ! command -v "$pkg" &> /dev/null; then
                 echo "[+] Installing $pkg..."
                 $PKG_MGR $pkg || return 1
@@ -148,6 +156,13 @@ LOG_GROUP_ID=$LOG_GROUP_ID
 PORT=$PORT
 MAX_UPLOAD_SIZE_MB=$MAX_UPLOAD
 EOF
+        
+        if command -v ffmpeg &> /dev/null; then
+            echo "FFMPEG_PATH=ffmpeg" >> "$BASE_DIR/.env"
+        else
+            echo "FFMPEG_PATH=disabled" >> "$BASE_DIR/.env"
+        fi
+
         chmod 600 "$BASE_DIR/.env"
         echo "✅ .env configuration saved"
     fi
@@ -316,6 +331,11 @@ stop_app() {
         pkill -f "cloudflared tunnel run" 2>/dev/null
     fi
     echo "✅ Stopped everything."
+}
+
+restart_app() {
+    stop_app
+    start_app
 }
 
 manage_tunnel() {
@@ -525,26 +545,28 @@ while true; do
     echo "  1. System Status"
     echo "  2. Start App"
     echo "  3. Stop App"
-    echo "  4. Manage Tunnel (Install/Change Domain/Remove)"
-    echo "  5. View Logs (System Logs)"
-    echo "  6. Edit Config (.env)"
-    echo "  7. Telecloud Commands (Auth / Reset Pass)"
-    echo "  8. Check for Updates"
-    echo "  9. Uninstall App"
-    echo "  10. Exit"
+    echo "  4. Restart App"
+    echo "  5. Manage Tunnel (Install/Change Domain/Remove)"
+    echo "  6. View Logs (System Logs)"
+    echo "  7. Edit Config (.env)"
+    echo "  8. Telecloud Commands (Auth / Reset Pass)"
+    echo "  9. Check for Updates"
+    echo "  10. Uninstall App"
+    echo "  11. Exit"
     echo "=========================================="
-    read -p "Choose an option (1-10): " c
+    read -p "Choose an option (1-11): " c
     case $c in
         1) check_status; pause ;;
         2) start_app; pause ;;
         3) stop_app; pause ;;
-        4) manage_tunnel; pause ;;
-        5) view_logs ;;
-        6) edit_env; pause ;;
-        7) telecloud_commands; pause ;;
-        8) update_app; pause ;;
-        9) uninstall ;;
-        10) clear; exit ;;
+        4) restart_app; pause ;;
+        5) manage_tunnel; pause ;;
+        6) view_logs ;;
+        7) edit_env; pause ;;
+        8) telecloud_commands; pause ;;
+        9) update_app; pause ;;
+        10) uninstall ;;
+        11) clear; exit ;;
         *) echo "[!] Invalid option!"; pause ;;
     esac
 done

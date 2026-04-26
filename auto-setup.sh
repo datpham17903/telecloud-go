@@ -38,9 +38,14 @@ SESSION="telecloud"
 # ========================
 install_dependencies() {
     echo "[+] Đang kiểm tra và cài đặt các gói cần thiết..."
+    echo "[!] Lưu ý: FFmpeg chỉ dùng để tạo ảnh thu nhỏ (thumbnail) cho video/audio."
+    echo "[!] Trên các dòng chip Exynos hoặc thiết bị yếu, FFmpeg có thể gây lỗi hoặc treo máy."
+    read -p "[?] Bạn có muốn cài đặt FFmpeg không? (y/n): " install_ffmpeg
 
     if [ "$OS_TYPE" == "linux" ]; then
-        $PKG_MGR curl wget tar unzip jq ffmpeg tmux nano
+        PACKAGES="curl wget tar unzip jq tmux nano"
+        [ "$install_ffmpeg" == "y" ] && PACKAGES="$PACKAGES ffmpeg"
+        $PKG_MGR $PACKAGES
 
         if ! command -v cloudflared &> /dev/null; then
             echo "[+] Đang cài đặt Cloudflared..."
@@ -63,7 +68,10 @@ install_dependencies() {
             echo "[+] Cloudflared đã cài xong!"
         fi
     else
-        for pkg in wget curl tar unzip tmux cloudflared jq ffmpeg nano; do
+        MAIN_PACKAGES="wget curl tar unzip tmux cloudflared jq nano"
+        [ "$install_ffmpeg" == "y" ] && MAIN_PACKAGES="$MAIN_PACKAGES ffmpeg"
+        
+        for pkg in $MAIN_PACKAGES; do
             if ! command -v "$pkg" &> /dev/null; then
                 echo "[+] Cài đặt $pkg..."
                 $PKG_MGR $pkg || return 1
@@ -148,6 +156,13 @@ LOG_GROUP_ID=$LOG_GROUP_ID
 PORT=$PORT
 MAX_UPLOAD_SIZE_MB=$MAX_UPLOAD
 EOF
+        
+        if command -v ffmpeg &> /dev/null; then
+            echo "FFMPEG_PATH=ffmpeg" >> "$BASE_DIR/.env"
+        else
+            echo "FFMPEG_PATH=disabled" >> "$BASE_DIR/.env"
+        fi
+
         chmod 600 "$BASE_DIR/.env"
         echo "✅ Đã lưu cấu hình .env"
     fi
@@ -316,6 +331,11 @@ stop_app() {
         pkill -f "cloudflared tunnel run" 2>/dev/null
     fi
     echo "✅ Đã dừng toàn bộ."
+}
+
+restart_app() {
+    stop_app
+    start_app
 }
 
 manage_tunnel() {
@@ -525,26 +545,28 @@ while true; do
     echo "  1. Trạng thái hệ thống"
     echo "  2. Khởi động ứng dụng"
     echo "  3. Dừng ứng dụng"
-    echo "  4. Quản lý Tunnel (Cài mới/Đổi miền/Gỡ)"
-    echo "  5. Xem Log (Nhật ký hệ thống)"
-    echo "  6. Sửa cấu hình (.env)"
-    echo "  7. Các lệnh của Telecloud (Auth / Reset Pass)"
-    echo "  8. Kiểm tra Cập nhật (Update)"
-    echo "  9. Gỡ cài đặt ứng dụng"
-    echo "  10. Thoát"
+    echo "  4. Khởi động lại ứng dụng"
+    echo "  5. Quản lý Tunnel (Cài mới/Đổi miền/Gỡ)"
+    echo "  6. Xem Log (Nhật ký hệ thống)"
+    echo "  7. Sửa cấu hình (.env)"
+    echo "  8. Các lệnh của Telecloud (Auth / Reset Pass)"
+    echo "  9. Kiểm tra Cập nhật (Update)"
+    echo "  10. Gỡ cài đặt ứng dụng"
+    echo "  11. Thoát"
     echo "=========================================="
-    read -p "Chọn chức năng (1-10): " c
+    read -p "Chọn chức năng (1-11): " c
     case $c in
         1) check_status; pause ;;
         2) start_app; pause ;;
         3) stop_app; pause ;;
-        4) manage_tunnel; pause ;;
-        5) view_logs ;;
-        6) edit_env; pause ;;
-        7) telecloud_commands; pause ;;
-        8) update_app; pause ;;
-        9) uninstall ;;
-        10) clear; exit ;;
+        4) restart_app; pause ;;
+        5) manage_tunnel; pause ;;
+        6) view_logs ;;
+        7) edit_env; pause ;;
+        8) telecloud_commands; pause ;;
+        9) update_app; pause ;;
+        10) uninstall ;;
+        11) clear; exit ;;
         *) echo "[!] Lựa chọn không hợp lệ!"; pause ;;
     esac
 done
