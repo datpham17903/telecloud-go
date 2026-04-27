@@ -185,7 +185,7 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 	}
 	defer os.RemoveAll(chunkDir) // Clean up chunk files after merge
 
-	// Download chunks in parallel
+	// Download chunks in parallel (max 2 at a time to avoid Telegram rate limit)
 	type chunkResult struct {
 		index int
 		path  string
@@ -194,6 +194,7 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 
 	results := make(chan chunkResult, len(chunks))
 	var wg sync.WaitGroup
+	downloadSemaphore := make(chan struct{}, 2) // Limit to 2 concurrent downloads
 
 	for i, chunk := range chunks {
 		if chunk.MessageID == nil {
@@ -203,6 +204,8 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 		wg.Add(1)
 		go func(idx int, msgID int, chunkSize int64) {
 			defer wg.Done()
+			downloadSemaphore <- struct{}{}     // Acquire
+			defer func() { <-downloadSemaphore }() // Release
 
 			fmt.Printf("[MergeDownload] Starting parallel download chunk %d/%d (msgID: %d)\n", idx+1, len(chunks), msgID)
 
