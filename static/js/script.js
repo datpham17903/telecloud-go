@@ -81,6 +81,32 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
 
         startDownload(fileId) {
             this.isPreparingDownload = true;
+            this.downloadProgress = { status: 'preparing', percent: 0, message: 'Preparing download...' };
+            
+            // Listen for download progress via SSE
+            const eventSource = new EventSource(`/api/download-progress/${fileId}`);
+            eventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    this.downloadProgress = data;
+                    if (data.status === 'done') {
+                        this.isPreparingDownload = false;
+                        eventSource.close();
+                        this.showToast(this.t('toast_dl_started'), 'success');
+                    } else if (data.status === 'error') {
+                        this.isPreparingDownload = false;
+                        eventSource.close();
+                        this.showToast(this.t('toast_tg_timeout'), 'error');
+                    }
+                } catch (e) {
+                    console.error('SSE error:', e);
+                }
+            };
+            eventSource.onerror = () => {
+                // SSE error, fall back to cookie method
+                eventSource.close();
+            };
+            
             document.cookie = "dl_started=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
             const iframe = document.createElement('iframe');
             iframe.style.display = 'none';
@@ -89,6 +115,7 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
             let checkCookie = setInterval(() => {
                 if (document.cookie.includes('dl_started=1')) {
                     clearInterval(checkCookie);
+                    this.downloadProgress = { status: 'downloading', percent: 50, message: 'Downloading from Telegram...' };
                     this.isPreparingDownload = false;
                     this.showToast(this.t('toast_dl_started'), 'success');
                     document.cookie = "dl_started=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
@@ -99,10 +126,11 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
                 if (this.isPreparingDownload) {
                     clearInterval(checkCookie);
                     this.isPreparingDownload = false;
+                    eventSource.close();
                     iframe.remove();
                     this.showToast(this.t('toast_tg_timeout'), 'error');
                 }
-            }, 15000);
+            }, 300000); // 5 minute timeout for large files
         },
         async downloadSelectedBatch() {
             const fileIdsToDownload = this.selectedIds.filter(id => {
@@ -236,17 +264,30 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
                     const data = JSON.parse(event.data);
                     let task = this.uploadQueue.find(t => t.id === data.task_id);
                     if (task) {
-                        if (data.status === 'telegram' || data.status === 'done') {
+                        if (data.status === 'uploading_chunk') {
+                            // Chunk upload progress (50-100% of total progress)
+                            const chunkProgress = Math.round(((data.percent || 0) / 100) * 50);
+                            task.progress = 50 + chunkProgress;
+                            if (data.message) {
+                                task.statusText = data.message; // e.g., "Uploading chunk 1/3 to Telegram..."
+                            } else {
+                                task.statusText = this.t('syncing_tg');
+                            }
+                        } else if (data.status === 'splitting') {
+                            task.statusText = data.message || 'Preparing file...';
+                            task.progress = Math.min(task.progress, 30);
+                        } else if (data.status === 'saving') {
+                            task.statusText = data.message || 'Saving...';
+                            task.progress = 95;
+                        } else if (data.status === 'telegram') {
                             task.progress = 50 + Math.round(data.percent / 2);
-                        }
-                        if (data.status === 'done') {
+                            task.statusText = this.t('syncing_tg');
+                        } else if (data.status === 'done') {
                             task.progress = 100;
                             task.statusText = this.t('done');
                             this.fetchFiles(true);
                         } else if (data.status === 'error') {
                             task.statusText = this.t('status_error') + ': ' + (data.message || 'Unknown');
-                        } else if (data.status === 'telegram') {
-                            task.statusText = this.t('syncing_tg');
                         }
                     }
                 } catch (e) {

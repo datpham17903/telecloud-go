@@ -177,44 +177,113 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 
 	fmt.Printf("[MergeDownload] Merging %d chunks for %s (original size: %d bytes)\n", len(chunks), filename, originalSize)
 
-	// Create temp file for merged output
+	// Create temp directory for chunk files
 	tempDir := cfg.TempDir
-	mergedPath := filepath.Join(tempDir, fmt.Sprintf("merged_%d_%s", parentID, filename))
-
-	// Download and merge chunks
-	outFile, err := os.Create(mergedPath)
-	if err != nil {
-		return fmt.Errorf("failed to create merged file: %v", err)
+	chunkDir := filepath.Join(tempDir, fmt.Sprintf("chunks_%d", parentID))
+	if err := os.MkdirAll(chunkDir, 0755); err != nil {
+		return fmt.Errorf("failed to create chunk directory: %v", err)
 	}
+	defer os.RemoveAll(chunkDir) // Clean up chunk files after merge
+
+	// Download chunks in parallel
+	type chunkResult struct {
+		index int
+		path  string
+		err   error
+	}
+
+	results := make(chan chunkResult, len(chunks))
+	var wg sync.WaitGroup
 
 	for i, chunk := range chunks {
 		if chunk.MessageID == nil {
 			continue
 		}
 
-		fmt.Printf("[MergeDownload] Downloading chunk %d/%d (msgID: %d)\n", i+1, len(chunks), *chunk.MessageID)
+		wg.Add(1)
+		go func(idx int, msgID int, chunkSize int64) {
+			defer wg.Done()
 
-		// Get chunk size from document metadata on Telegram
-		chunkSize := chunk.Size
-		if chunkSize <= 0 {
-			// If chunk size is 0, we need to get it from Telegram
-			chunkSize = getTelegramDocumentSize(ctx, *chunk.MessageID, cfg)
+			fmt.Printf("[MergeDownload] Starting parallel download chunk %d/%d (msgID: %d)\n", idx+1, len(chunks), msgID)
+
+			// Get chunk size from document metadata on Telegram if not set
+			if chunkSize <= 0 {
+				chunkSize = getTelegramDocumentSize(ctx, msgID, cfg)
+			}
+
+			reader, err := GetTelegramFileReader(ctx, msgID, chunkSize, cfg)
+			if err != nil {
+				results <- chunkResult{index: idx, err: fmt.Errorf("failed to get chunk %d reader: %v", idx, err)}
+				return
+			}
+
+			// Download to temp chunk file
+			chunkPath := filepath.Join(chunkDir, fmt.Sprintf("chunk_%d", idx))
+			outFile, err := os.Create(chunkPath)
+			if err != nil {
+				results <- chunkResult{index: idx, err: fmt.Errorf("failed to create chunk file: %v", err)}
+				return
+			}
+
+			written, err := io.Copy(outFile, reader)
+			outFile.Close()
+			if err != nil {
+				os.Remove(chunkPath)
+				results <- chunkResult{index: idx, err: fmt.Errorf("failed to copy chunk %d: %v", idx, err)}
+				return
+			}
+
+			fmt.Printf("[MergeDownload] Chunk %d downloaded: %d bytes\n", idx+1, written)
+			results <- chunkResult{index: idx, path: chunkPath}
+		}(i, *chunk.MessageID, chunk.Size)
+	}
+
+	// Wait for all downloads to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	chunkPaths := make([]string, len(chunks))
+	for result := range results {
+		if result.err != nil {
+			return fmt.Errorf("chunk download error: %v", result.err)
+		}
+		chunkPaths[result.index] = result.path
+	}
+
+	fmt.Printf("[MergeDownload] All chunks downloaded, merging...\n")
+
+	// Merge all chunks into final file
+	mergedPath := filepath.Join(tempDir, fmt.Sprintf("merged_%d_%s", parentID, filename))
+	outFile, err := os.Create(mergedPath)
+	if err != nil {
+		return fmt.Errorf("failed to create merged file: %v", err)
+	}
+
+	for i, chunkPath := range chunkPaths {
+		if chunkPath == "" {
+			outFile.Close()
+			os.Remove(mergedPath)
+			return fmt.Errorf("missing chunk at index %d", i)
 		}
 
-		reader, err := GetTelegramFileReader(ctx, *chunk.MessageID, chunkSize, cfg)
+		inFile, err := os.Open(chunkPath)
 		if err != nil {
 			outFile.Close()
 			os.Remove(mergedPath)
-			return fmt.Errorf("failed to get chunk %d reader: %v", i, err)
+			return fmt.Errorf("failed to open chunk file: %v", err)
 		}
 
-		written, err := io.Copy(outFile, reader)
+		written, err := io.Copy(outFile, inFile)
+		inFile.Close()
 		if err != nil {
 			outFile.Close()
 			os.Remove(mergedPath)
-			return fmt.Errorf("failed to copy chunk %d: %v", i, err)
+			return fmt.Errorf("failed to merge chunk %d: %v", i, err)
 		}
-		fmt.Printf("[MergeDownload] Chunk %d downloaded: %d bytes\n", i+1, written)
+		fmt.Printf("[MergeDownload] Merged chunk %d: %d bytes\n", i+1, written)
 	}
 
 	outFile.Close()

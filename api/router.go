@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -81,6 +82,41 @@ var loginAttempts sync.Map
 type loginAttempt struct {
 	count int
 	last  time.Time
+}
+
+// Download progress tracking
+var downloadProgress = make(map[int]*DownloadStatus)
+var downloadProgressMu sync.RWMutex
+
+type DownloadStatus struct {
+	FileID     int    `json:"file_id"`
+	Filename   string `json:"filename"`
+	Status     string `json:"status"` // "preparing", "downloading", "merging", "done", "error"
+	Percent    int    `json:"percent"`
+	Message    string `json:"message"`
+	TotalSize  int64  `json:"total_size"`
+	Downloaded int64  `json:"downloaded"`
+}
+
+func SetDownloadProgress(fileID int, status DownloadStatus) {
+	downloadProgressMu.Lock()
+	defer downloadProgressMu.Unlock()
+	downloadProgress[fileID] = &status
+}
+
+func GetDownloadProgress(fileID int) *DownloadStatus {
+	downloadProgressMu.RLock()
+	defer downloadProgressMu.RUnlock()
+	if s, ok := downloadProgress[fileID]; ok {
+		return s
+	}
+	return nil
+}
+
+func ClearDownloadProgress(fileID int) {
+	downloadProgressMu.Lock()
+	defer downloadProgressMu.Unlock()
+	delete(downloadProgress, fileID)
 }
 
 func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
@@ -329,6 +365,49 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 
 		api.GET("/ws", func(c *gin.Context) {
 			ws.HandleWebSocket(c.Writer, c.Request)
+		})
+
+		// SSE endpoint for download progress
+		api.GET("/download-progress/:id", func(c *gin.Context) {
+			fileID, _ := strconv.Atoi(c.Param("id"))
+			
+			c.Header("Content-Type", "text/event-stream")
+			c.Header("Cache-Control", "no-cache")
+			c.Header("Connection", "keep-alive")
+			c.Header("Access-Control-Allow-Origin", "*")
+			
+			// Send initial status
+			status := GetDownloadProgress(fileID)
+			if status != nil {
+				data, _ := json.Marshal(status)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+				c.Writer.Flush()
+			}
+			
+			// Stream updates
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			
+			clientGone := c.Request.Context().Done()
+			for {
+				select {
+				case <-clientGone:
+					return
+				case <-ticker.C:
+					status := GetDownloadProgress(fileID)
+					if status != nil && status.Status != "done" && status.Status != "error" {
+						data, _ := json.Marshal(status)
+						fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+						c.Writer.Flush()
+					} else if status != nil {
+						data, _ := json.Marshal(status)
+						fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+						c.Writer.Flush()
+						ClearDownloadProgress(fileID)
+						return
+					}
+				}
+			}
 		})
 
 		api.GET("/files", func(c *gin.Context) {
