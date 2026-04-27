@@ -337,7 +337,8 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 				path = "/"
 			}
 			var files []database.File
-			err := database.DB.Select(&files, "SELECT * FROM files WHERE path = ? ORDER BY is_folder DESC, id DESC", path)
+			// Only show parent files (not chunks) - hide files where parent_id IS NOT NULL
+			err := database.DB.Select(&files, "SELECT * FROM files WHERE path = ? AND (parent_id IS NULL OR parent_id = 0) ORDER BY is_folder DESC, id DESC", path)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
@@ -515,6 +516,14 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 				return
 			}
 			
+			// If this is a chunk, get the parent
+			if item.ParentID != nil && *item.ParentID != 0 {
+				var parent database.File
+				if err := database.DB.Get(&parent, "SELECT * FROM files WHERE id = ?", *item.ParentID); err == nil {
+					item = parent
+				}
+			}
+			
 			if item.IsFolder {
 				oldPrefix := item.Path + "/" + item.Filename
 				if item.Path == "/" {
@@ -548,21 +557,43 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 					tgclient.DeleteMessages(context.Background(), cfg, msgIDsToDelete)
 				}
 			} else {
-				if item.MessageID != nil {
-					var count int
-					database.DB.Get(&count, "SELECT COUNT(*) FROM files WHERE message_id = ?", *item.MessageID)
-					if count <= 1 {
-						tgclient.DeleteMessages(context.Background(), cfg, []int{*item.MessageID})
+				// Check if this is a chunked file
+				if item.IsChunked {
+					// Get all chunks for this file
+					var chunks []database.File
+					database.DB.Select(&chunks, "SELECT message_id FROM files WHERE (parent_id = ? OR message_id = ?) AND message_id IS NOT NULL", id, id)
+					
+					var msgIDsToDelete []int
+					for _, chunk := range chunks {
+						if chunk.MessageID != nil {
+							msgIDsToDelete = append(msgIDsToDelete, *chunk.MessageID)
+						}
 					}
-				}
-				if item.ThumbPath != nil {
-					var count int
-					database.DB.Get(&count, "SELECT COUNT(*) FROM files WHERE thumb_path = ?", *item.ThumbPath)
-					if count <= 1 {
-						os.Remove(*item.ThumbPath)
+					
+					// Delete all chunks from DB
+					database.DB.Exec("DELETE FROM files WHERE parent_id = ? OR id = ?", id, id)
+					
+					// Delete all Telegram messages
+					if len(msgIDsToDelete) > 0 {
+						tgclient.DeleteMessages(context.Background(), cfg, msgIDsToDelete)
 					}
+				} else {
+					if item.MessageID != nil {
+						var count int
+						database.DB.Get(&count, "SELECT COUNT(*) FROM files WHERE message_id = ?", *item.MessageID)
+						if count <= 1 {
+							tgclient.DeleteMessages(context.Background(), cfg, []int{*item.MessageID})
+						}
+					}
+					if item.ThumbPath != nil {
+						var count int
+						database.DB.Get(&count, "SELECT COUNT(*) FROM files WHERE thumb_path = ?", *item.ThumbPath)
+						if count <= 1 {
+							os.Remove(*item.ThumbPath)
+						}
+					}
+					database.DB.Exec("DELETE FROM files WHERE id = ?", id)
 				}
-				database.DB.Exec("DELETE FROM files WHERE id = ?", id)
 			}
 			
 			c.JSON(http.StatusOK, gin.H{"status": "deleted"})

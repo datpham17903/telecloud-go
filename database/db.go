@@ -10,16 +10,23 @@ import (
 )
 
 type File struct {
-	ID         int       `db:"id" json:"id"`
-	MessageID  *int      `db:"message_id" json:"message_id"`
-	Filename   string    `db:"filename" json:"filename"`
-	Path       string    `db:"path" json:"path"`
-	Size       int64     `db:"size" json:"size"`
-	MimeType   *string   `db:"mime_type" json:"mime_type"`
-	ShareToken *string   `db:"share_token" json:"share_token"`
-	IsFolder   bool      `db:"is_folder" json:"is_folder"`
-	ThumbPath  *string   `db:"thumb_path" json:"thumb_path"`
-	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+	ID           int       `db:"id" json:"id"`
+	MessageID    *int      `db:"message_id" json:"message_id"`
+	Filename     string    `db:"filename" json:"filename"`
+	Path         string    `db:"path" json:"path"`
+	Size         int64     `db:"size" json:"size"`
+	MimeType     *string   `db:"mime_type" json:"mime_type"`
+	ShareToken   *string   `db:"share_token" json:"share_token"`
+	IsFolder     bool      `db:"is_folder" json:"is_folder"`
+	ThumbPath    *string   `db:"thumb_path" json:"thumb_path"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	
+	// Chunking support
+	IsChunked    bool      `db:"is_chunked" json:"is_chunkbed,omitempty"`
+	ParentID     *int      `db:"parent_id" json:"parent_id,omitempty"`
+	ChunkIndex   *int      `db:"chunk_index" json:"chunk_index,omitempty"`
+	TotalChunks  *int      `db:"total_chunks" json:"total_chunks,omitempty"`
+	OriginalSize *int64    `db:"original_size" json:"original_size,omitempty"`
 	
 	// Virtual fields
 	DirectToken string `db:"-" json:"direct_token,omitempty"`
@@ -66,6 +73,8 @@ func InitDB(dbPath string) {
 
 	CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
 	CREATE INDEX IF NOT EXISTS idx_files_message_id ON files(message_id);
+	CREATE INDEX IF NOT EXISTS idx_files_parent_id ON files(parent_id);
+	CREATE INDEX IF NOT EXISTS idx_files_is_chunked ON files(is_chunked);
 	`
 	_, err = DB.Exec(schema)
 	if err != nil {

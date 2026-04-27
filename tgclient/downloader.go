@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"telecloud/config"
+	"telecloud/database"
 
 	"github.com/gotd/td/tg"
 )
@@ -101,6 +105,14 @@ func ServeTelegramFile(c *http.Request, w http.ResponseWriter, msgID int, filena
 		fmt.Printf("[Stream] Range request for %s: %s\n", filename, rangeHeader)
 	}
 
+	// Check if this is a chunked file by looking for chunks in DB
+	var isChunked bool
+	err := database.DB.Get(&isChunked, "SELECT is_chunked FROM files WHERE message_id = ? LIMIT 1", msgID)
+	if err == nil && isChunked {
+		// This is a chunked file - serve merged
+		return ServeMergedFile(c, w, msgID, filename, size, cfg)
+	}
+
 	reader, err := GetTelegramFileReader(ctx, msgID, size, cfg)
 	if err != nil {
 		return err
@@ -110,6 +122,111 @@ func ServeTelegramFile(c *http.Request, w http.ResponseWriter, msgID int, filena
 	w.Header().Set("Accept-Ranges", "bytes")
 	
 	http.ServeContent(w, c, filename, time.Time{}, reader)
+	return nil
+}
+
+// ServeMergedFile downloads all chunks and serves the merged file
+func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename string, size int64, cfg *config.Config) error {
+	ctx := c.Context()
+
+	// Find the parent file or this chunk's parent ID
+	var parentID int
+	var isChunked bool
+	err := database.DB.Get(&isChunked, "SELECT is_chunked FROM files WHERE message_id = ? LIMIT 1", msgID)
+	if err != nil {
+		return fmt.Errorf("file not found in database")
+	}
+
+	if isChunked {
+		// Check if this msgID is a parent or a chunk by looking at the database
+		var dbParentID *int
+		err := database.DB.Get(&dbParentID, "SELECT parent_id FROM files WHERE message_id = ? LIMIT 1", msgID)
+		if err == nil && dbParentID != nil && *dbParentID != 0 {
+			// This is a chunk, get parent ID
+			parentID = *dbParentID
+		} else {
+			// This IS the parent (first chunk's message_id)
+			parentID = msgID
+		}
+	}
+
+	// Get all chunks for this parent
+	var chunks []database.File
+	err = database.DB.Select(&chunks, "SELECT * FROM files WHERE parent_id = ? OR message_id = ? ORDER BY chunk_index", parentID, parentID)
+	if err != nil || len(chunks) == 0 {
+		return fmt.Errorf("chunks not found")
+	}
+
+	// Sort by chunk index
+	sort.Slice(chunks, func(i, j int) bool {
+		if chunks[i].ChunkIndex == nil || chunks[j].ChunkIndex == nil {
+			return false
+		}
+		return *chunks[i].ChunkIndex < *chunks[j].ChunkIndex
+	})
+
+	// Get original size
+	var originalSize int64
+	for _, chunk := range chunks {
+		if chunk.OriginalSize != nil {
+			originalSize = *chunk.OriginalSize
+			break
+		}
+	}
+	if originalSize == 0 {
+		originalSize = size
+	}
+
+	fmt.Printf("[MergeDownload] Merging %d chunks for %s (original size: %d bytes)\n", len(chunks), filename, originalSize)
+
+	// Create temp file for merged output
+	tempDir := cfg.TempDir
+	mergedPath := filepath.Join(tempDir, fmt.Sprintf("merged_%d_%s", parentID, filename))
+
+	// Download and merge chunks
+	outFile, err := os.Create(mergedPath)
+	if err != nil {
+		return fmt.Errorf("failed to create merged file: %v", err)
+	}
+
+	for i, chunk := range chunks {
+		if chunk.MessageID == nil {
+			continue
+		}
+
+		fmt.Printf("[MergeDownload] Downloading chunk %d/%d (msgID: %d)\n", i+1, len(chunks), *chunk.MessageID)
+
+		reader, err := GetTelegramFileReader(ctx, *chunk.MessageID, 0, cfg)
+		if err != nil {
+			outFile.Close()
+			os.Remove(mergedPath)
+			return fmt.Errorf("failed to get chunk %d reader: %v", i, err)
+		}
+
+		_, err = io.Copy(outFile, reader)
+		if err != nil {
+			outFile.Close()
+			os.Remove(mergedPath)
+			return fmt.Errorf("failed to copy chunk %d: %v", i, err)
+		}
+	}
+
+	outFile.Close()
+
+	// Serve the merged file
+	mergedFile, err := os.Open(mergedPath)
+	if err != nil {
+		os.Remove(mergedPath)
+		return fmt.Errorf("failed to open merged file: %v", err)
+	}
+	defer mergedFile.Close()
+	defer os.Remove(mergedPath) // Clean up after serving
+
+	// Set proper headers
+	w.Header().Set("Accept-Ranges", "none")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", originalSize))
+
+	http.ServeContent(w, c, filename, time.Time{}, mergedFile)
 	return nil
 }
 
