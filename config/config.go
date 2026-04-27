@@ -17,6 +17,8 @@ type Config struct {
 	LogGroupID      string
 	Port            string
 	TempDir         string
+	SmallFileTempDir string  // For files < 2GB (tmpfs)
+	LargeFileTempDir string  // For files >= 2GB (disk)
 	ProxyURL        string
 	Version         string
 	SessionFile     string
@@ -40,6 +42,10 @@ func Load() *Config {
 
 	logGroupID := os.Getenv("LOG_GROUP_ID")
 
+	// Small files (<2GB) use tmpfs for speed, large files use disk to save RAM
+	smallTemp := getEnv("SMALL_FILE_TEMP_DIR", os.TempDir()+"/telecloud_temp_chunks")
+	largeTemp := getEnv("LARGE_FILE_TEMP_DIR", "/opt/telecloud-temp")
+
 	return &Config{
 		APIID:           apiID,
 		APIHash:         apiHash,
@@ -48,7 +54,9 @@ func Load() *Config {
 		ThumbsDir:       getEnv("THUMBS_DIR", "static/thumbs"),
 		LogGroupID:      logGroupID,
 		Port:            getEnv("PORT", "8091"),
-		TempDir:         getEnv("TEMP_DIR", os.TempDir()+"/telecloud_temp_chunks"),
+		TempDir:         largeTemp, // Default to large file temp
+		SmallFileTempDir: smallTemp,
+		LargeFileTempDir: largeTemp,
 		ProxyURL:        getEnv("PROXY_URL", ""),
 		SessionFile:     getEnv("SESSION_FILE", "session.json"),
 		FFMPEGPath:      getEnv("FFMPEG_PATH", "ffmpeg"),

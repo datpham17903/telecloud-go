@@ -389,7 +389,14 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 			chunkIndex, _ := strconv.Atoi(c.PostForm("chunk_index"))
 			totalChunks, _ := strconv.Atoi(c.PostForm("total_chunks"))
 
-			tempDir := cfg.TempDir
+			// Choose temp dir based on file size: <2GB use tmpfs, >=2GB use disk
+			contentLength := c.Request.ContentLength
+			var tempDir string
+			if contentLength > 0 && contentLength >= 2*1024*1024*1024 {
+				tempDir = cfg.LargeFileTempDir
+			} else {
+				tempDir = cfg.SmallFileTempDir
+			}
 			os.MkdirAll(tempDir, os.ModePerm)
 			tempFilePath := filepath.Join(tempDir, taskID+"_"+filename)
 
