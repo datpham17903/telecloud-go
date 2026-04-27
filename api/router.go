@@ -735,6 +735,14 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 		if item.MimeType != nil {
 			c.Header("Content-Type", *item.MimeType)
 		}
+
+		// Initialize progress tracking
+		tgclient.SetDownloadProgress(id, tgclient.DownloadProgress{
+			Status:  "preparing",
+			Percent: 0,
+			Message: "Starting download...",
+		})
+
 		c.SetCookie("dl_started", "1", 15, "/", "", false, false)
 
 		if err := tgclient.ServeTelegramFile(c.Request, c.Writer, *item.MessageID, item.Filename, item.Size, cfg); err != nil {

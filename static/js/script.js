@@ -13,6 +13,7 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
         isLoading: false, 
         isRefreshing: false,
         isPreparingDownload: false,
+        downloadProgress: null,
         ws: null,
         lang: TeleCloud.lang,
         t(key, params) { return TeleCloud.t(key, params, this.lang); },
@@ -84,18 +85,22 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
             this.downloadProgress = { status: 'preparing', percent: 0, message: 'Preparing download...' };
             
             // Listen for download progress via SSE
-            const eventSource = new EventSource(`/api/download-progress/${fileId}`);
+            const eventSource = new EventSource(`/download-progress/${fileId}`);
             eventSource.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
                     this.downloadProgress = data;
-                    if (data.status === 'done') {
-                        this.isPreparingDownload = false;
-                        eventSource.close();
-                        this.showToast(this.t('toast_dl_started'), 'success');
+                    if (data.status === 'done' || data.status === 'merging') {
+                        if (data.status === 'done') {
+                            this.isPreparingDownload = false;
+                            eventSource.close();
+                            this.showToast(this.t('toast_dl_started'), 'success');
+                            setTimeout(() => iframe && iframe.remove(), 2000);
+                        }
                     } else if (data.status === 'error') {
                         this.isPreparingDownload = false;
                         eventSource.close();
+                        iframe && iframe.remove();
                         this.showToast(this.t('toast_tg_timeout'), 'error');
                     }
                 } catch (e) {
@@ -103,7 +108,6 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
                 }
             };
             eventSource.onerror = () => {
-                // SSE error, fall back to cookie method
                 eventSource.close();
             };
             
@@ -112,25 +116,15 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
             iframe.style.display = 'none';
             iframe.src = `/download/${fileId}`;
             document.body.appendChild(iframe);
-            let checkCookie = setInterval(() => {
-                if (document.cookie.includes('dl_started=1')) {
-                    clearInterval(checkCookie);
-                    this.downloadProgress = { status: 'downloading', percent: 50, message: 'Downloading from Telegram...' };
-                    this.isPreparingDownload = false;
-                    this.showToast(this.t('toast_dl_started'), 'success');
-                    document.cookie = "dl_started=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-                    setTimeout(() => iframe.remove(), 2000); 
-                }
-            }, 500);
+            
             setTimeout(() => {
                 if (this.isPreparingDownload) {
-                    clearInterval(checkCookie);
                     this.isPreparingDownload = false;
                     eventSource.close();
                     iframe.remove();
                     this.showToast(this.t('toast_tg_timeout'), 'error');
                 }
-            }, 300000); // 5 minute timeout for large files
+            }, 300000);
         },
         async downloadSelectedBatch() {
             const fileIdsToDownload = this.selectedIds.filter(id => {
