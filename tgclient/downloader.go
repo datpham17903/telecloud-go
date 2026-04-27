@@ -227,8 +227,9 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, fileID int, msgID i
 
 		fmt.Printf("[MergeDownload] Downloading chunk %d/%d (msgID: %d)\n", i+1, len(chunks), *chunk.MessageID)
 
-		// Update progress
-		percent := (i * 100) / len(chunks)
+		// Calculate percent based on which chunk is downloading
+		// Chunk 1/2 = 50%, Chunk 2/2 = 100%
+		percent := ((i + 1) * 100) / len(chunks)
 		SetDownloadProgress(parentID, DownloadProgress{
 			Status:  "downloading",
 			Percent: percent,
