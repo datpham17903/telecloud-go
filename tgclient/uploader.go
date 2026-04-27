@@ -183,6 +183,15 @@ func ProcessCompleteUpload(ctx context.Context, filePath, filename, path, mimeTy
 
 	// Check if file needs chunking (> 2GB for non-Premium accounts)
 	if totalSize > 2*1024*1024*1024 {
+		// Use sidecar (Premium) if available
+		sidecar := NewSidecarClient(cfg.SidecarURL)
+		status, serr := sidecar.CheckStatus()
+		if serr == nil && status.Connected && status.User.IsPremium {
+			UpdateTask(taskID, "sidecar_available", 0, "Using Premium session...")
+			ProcessChunkedUploadSidecar(ctx, filePath, filename, path, mimeType, taskID, cfg, totalSize)
+			return
+		}
+		UpdateTask(taskID, "telegram", 0, "Using bot API for large file...")
 		ProcessChunkedUpload(ctx, filePath, filename, path, mimeType, taskID, cfg, totalSize)
 		return
 	}
@@ -444,3 +453,93 @@ func DeleteMessages(ctx context.Context, cfg *config.Config, msgIDs []int) error
 	})
 	return err
 }
+
+
+// ProcessChunkedUploadSidecar handles chunked upload via pyrogram sidecar (Premium speed)
+func ProcessChunkedUploadSidecar(ctx context.Context, filePath, filename, path, mimeType, taskID string, cfg *config.Config, totalSize int64) {
+	UpdateTask(taskID, "sidecar_check", 0, "Checking sidecar connection...")
+
+	sidecar := NewSidecarClient(cfg.SidecarURL)
+	status, err := sidecar.CheckStatus()
+	if err != nil || !status.Connected {
+		UpdateTask(taskID, "error", 0, "Sidecar not connected: "+err.Error())
+		return
+	}
+
+	if !status.User.IsPremium {
+		UpdateTask(taskID, "error", 0, "User session is not Premium")
+		return
+	}
+
+	UpdateTask(taskID, "splitting", 0, "Splitting file into chunks...")
+
+	chunkPaths, err := utils.SplitFile(filePath)
+	if err != nil {
+		UpdateTask(taskID, "error", 0, "Failed to split file: "+err.Error())
+		return
+	}
+
+	totalChunks := len(chunkPaths)
+
+	UpdateTask(taskID, "sidecar_upload", 0, fmt.Sprintf("Uploading %d chunks via Premium session...", totalChunks))
+
+	chatID, err := strconv.ParseInt(cfg.LogGroupID, 10, 64)
+	if err != nil {
+		utils.CleanupChunks(chunkPaths)
+		UpdateTask(taskID, "error", 0, "Invalid LOG_GROUP_ID")
+		return
+	}
+
+	chunkMsgIDs := make([]int, totalChunks)
+	for i, chunkPath := range chunkPaths {
+		progress := (i * 100) / totalChunks
+		UpdateTask(taskID, "sidecar_upload", progress, fmt.Sprintf("Uploading chunk %d/%d...", i+1, totalChunks))
+
+		result, err := sidecar.UploadFile(chunkPath, chatID)
+		if err != nil {
+			utils.CleanupChunks(chunkPaths)
+			UpdateTask(taskID, "error", 0, fmt.Sprintf("Failed to upload chunk %d: %s", i, err.Error()))
+			return
+		}
+
+		if !result.Success {
+			utils.CleanupChunks(chunkPaths)
+			UpdateTask(taskID, "error", 0, fmt.Sprintf("Sidecar error on chunk %d: %s", i, result.Error))
+			return
+		}
+
+		chunkMsgIDs[i] = int(result.MessageID)
+		os.Remove(chunkPath)
+	}
+
+	UpdateTask(taskID, "saving", 95, "Saving to database...")
+
+	_, err = database.DB.Exec(
+		"INSERT INTO files (message_id, filename, path, size, mime_type, is_folder, is_chunked, original_size) VALUES (?, ?, ?, ?, ?, 0, 1, ?)",
+		chunkMsgIDs[0], filename, path, totalSize, mimeType, totalSize,
+	)
+	if err != nil {
+		UpdateTask(taskID, "error", 0, "DB Error (parent): "+err.Error())
+		return
+	}
+
+	parentID := 0
+	err = database.DB.Get(&parentID, "SELECT last_insert_rowid()")
+	if err != nil {
+		UpdateTask(taskID, "error", 0, "Failed to get parent ID: "+err.Error())
+		return
+	}
+
+	for i, msgID := range chunkMsgIDs {
+		_, err = database.DB.Exec(
+			"INSERT INTO files (message_id, filename, path, size, mime_type, is_folder, is_chunked, parent_id, chunk_index, total_chunks) VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?, ?)",
+			msgID, fmt.Sprintf("%s.chunk.%d", filename, i), path, 0, mimeType, parentID, i, totalChunks,
+		)
+		if err != nil {
+			fmt.Printf("Warning: Failed to save chunk %d to DB: %s\n", i, err.Error())
+		}
+	}
+
+	UpdateTask(taskID, "done", 100, "")
+}
+

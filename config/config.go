@@ -23,6 +23,7 @@ type Config struct {
 	Version         string
 	SessionFile     string
 	FFMPEGPath      string
+	SidecarURL      string  // Pyrogram sidecar URL for Premium speed
 }
 
 func Load() *Config {
