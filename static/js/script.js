@@ -111,7 +111,6 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
                 eventSource.close();
             };
             
-            let link = null;
             document.cookie = "dl_started=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
             // Use a hidden link to trigger download
             const link = document.createElement('a');
