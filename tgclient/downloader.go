@@ -129,30 +129,26 @@ func ServeTelegramFile(c *http.Request, w http.ResponseWriter, msgID int, filena
 func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename string, size int64, cfg *config.Config) error {
 	ctx := c.Context()
 
-	// Find the parent file or this chunk's parent ID
-	var parentID int
-	var isChunked bool
-	err := database.DB.Get(&isChunked, "SELECT is_chunked FROM files WHERE message_id = ? LIMIT 1", msgID)
+	// Find the parent file by message_id and get its actual database ID
+	var parentFile database.File
+	err := database.DB.Get(&parentFile, "SELECT * FROM files WHERE message_id = ? LIMIT 1", msgID)
 	if err != nil {
 		return fmt.Errorf("file not found in database")
 	}
 
-	if isChunked {
-		// Check if this msgID is a parent or a chunk by looking at the database
-		var dbParentID *int
-		err := database.DB.Get(&dbParentID, "SELECT parent_id FROM files WHERE message_id = ? LIMIT 1", msgID)
-		if err == nil && dbParentID != nil && *dbParentID != 0 {
-			// This is a chunk, get parent ID
-			parentID = *dbParentID
-		} else {
-			// This IS the parent (first chunk's message_id)
-			parentID = msgID
-		}
+	if !parentFile.IsChunked {
+		return fmt.Errorf("file is not chunked")
 	}
 
-	// Get all chunks for this parent
+	// Get the actual parent ID (could be the file's own id if it's the parent, or the parent_id if it's a chunk)
+	parentID := parentFile.ID
+	if parentFile.ParentID != nil && *parentFile.ParentID != 0 {
+		parentID = *parentFile.ParentID
+	}
+
+	// Get all chunks for this parent (including the parent itself if it has chunks)
 	var chunks []database.File
-	err = database.DB.Select(&chunks, "SELECT * FROM files WHERE parent_id = ? OR message_id = ? ORDER BY chunk_index", parentID, parentID)
+	err = database.DB.Select(&chunks, "SELECT * FROM files WHERE parent_id = ? OR id = ? ORDER BY chunk_index", parentID, parentID)
 	if err != nil || len(chunks) == 0 {
 		return fmt.Errorf("chunks not found")
 	}
