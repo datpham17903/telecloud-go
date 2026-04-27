@@ -111,16 +111,26 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
                 eventSource.close();
             };
             
+            let link = null;
             document.cookie = "dl_started=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-            const iframe = document.createElement('iframe');
-            iframe.style.display = 'none';
-            iframe.src = `/download/${fileId}`;
-            document.body.appendChild(iframe);
+            // Use a hidden link to trigger download
+            const link = document.createElement('a');
+            link.href = `/download/${fileId}`;
+            link.style.display = 'none';
+            link.download = ''; // Let browser set filename from Content-Disposition
+            document.body.appendChild(link);
+            // Click after a short delay to ensure everything is set up
+            setTimeout(() => {
+                link.click();
+                document.body.removeChild(link);
+            }, 500);
             
             setTimeout(() => {
                 if (this.isPreparingDownload) {
                     this.isPreparingDownload = false;
                     eventSource.close();
+                    iframe && iframe.remove();
+                    link && document.body.removeChild(link);
                     iframe.remove();
                     this.showToast(this.t('toast_tg_timeout'), 'error');
                 }
