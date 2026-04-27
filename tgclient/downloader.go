@@ -192,19 +192,27 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 
 		fmt.Printf("[MergeDownload] Downloading chunk %d/%d (msgID: %d)\n", i+1, len(chunks), *chunk.MessageID)
 
-		reader, err := GetTelegramFileReader(ctx, *chunk.MessageID, 0, cfg)
+		// Get chunk size from document metadata on Telegram
+		chunkSize := chunk.Size
+		if chunkSize <= 0 {
+			// If chunk size is 0, we need to get it from Telegram
+			chunkSize = getTelegramDocumentSize(ctx, *chunk.MessageID, cfg)
+		}
+
+		reader, err := GetTelegramFileReader(ctx, *chunk.MessageID, chunkSize, cfg)
 		if err != nil {
 			outFile.Close()
 			os.Remove(mergedPath)
 			return fmt.Errorf("failed to get chunk %d reader: %v", i, err)
 		}
 
-		_, err = io.Copy(outFile, reader)
+		written, err := io.Copy(outFile, reader)
 		if err != nil {
 			outFile.Close()
 			os.Remove(mergedPath)
 			return fmt.Errorf("failed to copy chunk %d: %v", i, err)
 		}
+		fmt.Printf("[MergeDownload] Chunk %d downloaded: %d bytes\n", i+1, written)
 	}
 
 	outFile.Close()
@@ -312,4 +320,67 @@ func GetTelegramFileReader(ctx context.Context, msgID int, size int64, cfg *conf
 	}
 
 	return reader, nil
+}
+
+// getTelegramDocumentSize fetches the document size from Telegram for a given message
+func getTelegramDocumentSize(ctx context.Context, msgID int, cfg *config.Config) int64 {
+	api := Client.API()
+	peer, err := resolveLogGroup(ctx, api, cfg.LogGroupID)
+	if err != nil {
+		fmt.Printf("[MergeDownload] Failed to resolve peer for size lookup: %v\n", err)
+		return 0
+	}
+
+	var msgs tg.MessageClassArray
+
+	if channel, ok := peer.(*tg.InputPeerChannel); ok {
+		res, err := api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  channel.ChannelID,
+				AccessHash: channel.AccessHash,
+			},
+			ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+		})
+		if err != nil {
+			fmt.Printf("[MergeDownload] Failed to get messages for size: %v\n", err)
+			return 0
+		}
+		if m, ok := res.(*tg.MessagesChannelMessages); ok {
+			msgs = m.Messages
+		}
+	} else {
+		res, err := api.MessagesGetMessages(ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}})
+		if err != nil {
+			fmt.Printf("[MergeDownload] Failed to get messages for size: %v\n", err)
+			return 0
+		}
+		if m, ok := res.(*tg.MessagesMessages); ok {
+			msgs = m.Messages
+		} else if m, ok := res.(*tg.MessagesMessagesSlice); ok {
+			msgs = m.Messages
+		}
+	}
+
+	if len(msgs) == 0 {
+		fmt.Printf("[MergeDownload] No messages found for size lookup\n")
+		return 0
+	}
+
+	msg, ok := msgs[0].(*tg.Message)
+	if !ok || msg.Media == nil {
+		return 0
+	}
+
+	docMedia, ok := msg.Media.(*tg.MessageMediaDocument)
+	if !ok {
+		return 0
+	}
+
+	doc, ok := docMedia.Document.(*tg.Document)
+	if !ok {
+		return 0
+	}
+
+	fmt.Printf("[MergeDownload] Document size for msgID %d: %d bytes\n", msgID, doc.Size)
+	return doc.Size
 }
