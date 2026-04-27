@@ -27,6 +27,13 @@ type SidecarUploadResponse struct {
 	Error     string `json:"error"`
 }
 
+type SidecarDownloadResponse struct {
+	Success   bool   `json:"success"`
+	FilePath  string `json:"file_path"`
+	FileSize  int64  `json:"file_size"`
+	Error     string `json:"error"`
+}
+
 type SidecarStatusResponse struct {
 	Connected bool `json:"connected"`
 	User      struct {
@@ -105,6 +112,32 @@ func (sc *SidecarClient) UploadFile(filePath string, chatID int64) (*SidecarUplo
 	defer resp.Body.Close()
 
 	var result SidecarUploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// DownloadFile downloads a file from Telegram via the sidecar (user session with Premium speed)
+func (sc *SidecarClient) DownloadFile(messageID int64, chatID int64, outputPath string) (*SidecarDownloadResponse, error) {
+	jsonData := map[string]interface{}{
+		"message_id": messageID,
+		"chat_id": chatID,
+		"output_path": outputPath,
+	}
+
+	body, err := json.Marshal(jsonData)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := sc.client.Post(sc.baseURL+"/download", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result SidecarDownloadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}

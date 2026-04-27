@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -464,3 +465,102 @@ func getTelegramDocumentSize(ctx context.Context, msgID int, cfg *config.Config)
 	fmt.Printf("[MergeDownload] Document size for msgID %d: %d bytes\n", msgID, doc.Size)
 	return doc.Size
 }
+
+
+// ServeMergedFileSidecar downloads chunked file via pyrogram sidecar (Premium speed) and serves it
+func ServeMergedFileSidecar(c *http.Request, w http.ResponseWriter, fileID int, msgID int, filename string, size int64, cfg *config.Config) error {
+	// Check sidecar status
+	sidecar := NewSidecarClient(cfg.SidecarURL)
+	status, err := sidecar.CheckStatus()
+	if err != nil || !status.Connected || !status.User.IsPremium {
+		// Fall back to bot API
+		return ServeMergedFile(c, w, fileID, msgID, filename, size, cfg)
+	}
+
+	// Get chunks from database
+	var parentFile database.File
+	err = database.DB.Get(&parentFile, "SELECT * FROM files WHERE message_id = ? LIMIT 1", msgID)
+	if err != nil {
+		return fmt.Errorf("file not found in database")
+	}
+
+	parentID := parentFile.ID
+	if parentFile.ParentID != nil && *parentFile.ParentID != 0 {
+		parentID = *parentFile.ParentID
+	}
+
+	var chunks []database.File
+	err = database.DB.Select(&chunks, "SELECT * FROM files WHERE parent_id = ? ORDER BY chunk_index", parentID)
+	if err != nil || len(chunks) == 0 {
+		return fmt.Errorf("chunks not found")
+	}
+
+	// Set download progress
+	SetDownloadProgress(fileID, DownloadProgress{
+		Status:    "preparing",
+		Percent:   0,
+		Message:   fmt.Sprintf("Downloading %d chunks via Premium...", len(chunks)),
+	})
+
+	// Create temp directory for chunks
+	tempDir := os.TempDir()
+	defer os.RemoveAll(tempDir)
+
+	mergedPath := filepath.Join(tempDir, filename)
+	mergedFile, err := os.Create(mergedPath)
+	if err != nil {
+		return fmt.Errorf("failed to create merged file: %w", err)
+	}
+	defer mergedFile.Close()
+
+	// Download each chunk via sidecar
+	for i, chunk := range chunks {
+		progress := ((i + 1) * 100) / len(chunks)
+		SetDownloadProgress(fileID, DownloadProgress{
+			Status:    "downloading",
+			Percent:   progress,
+			Message:   fmt.Sprintf("Downloading chunk %d/%d via Premium...", i+1, len(chunks)),
+		})
+
+		chunkPath := filepath.Join(tempDir, fmt.Sprintf("chunk_%d", i))
+
+		chatID, _ := strconv.ParseInt(cfg.LogGroupID, 10, 64)
+		result, err := sidecar.DownloadFile(int64(*chunk.MessageID), chatID, chunkPath)
+		if err != nil {
+			SetDownloadProgress(fileID, DownloadProgress{
+				Status:    "error",
+				Percent:   0,
+				Message:   fmt.Sprintf("Failed to download chunk %d: %s", i, err.Error()),
+			})
+			return fmt.Errorf("sidecar download error: %w", err)
+		}
+
+		if !result.Success {
+			SetDownloadProgress(fileID, DownloadProgress{
+				Status:    "error",
+				Percent:   0,
+				Message:   fmt.Sprintf("Sidecar error on chunk %d: %s", i, result.Error),
+			})
+			return fmt.Errorf("sidecar error: %s", result.Error)
+		}
+
+		// Append chunk to merged file
+		chunkData, err := os.ReadFile(chunkPath)
+		if err != nil {
+			return fmt.Errorf("failed to read chunk %d: %w", i, err)
+		}
+		mergedFile.Write(chunkData)
+		os.Remove(chunkPath)
+	}
+
+	SetDownloadProgress(fileID, DownloadProgress{
+		Status:    "done",
+		Percent:   100,
+		Message:   "Download complete",
+	})
+
+	// Serve the merged file
+	http.ServeContent(w, c, filename, time.Time{}, mergedFile)
+	return nil
+}
+

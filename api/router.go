@@ -726,7 +726,7 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 	r.GET("/download/:id", authMiddleware(), func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 		var item database.File
-		if err := database.DB.Get(&item, "SELECT message_id, filename, mime_type, size FROM files WHERE id = ?", id); err != nil || item.MessageID == nil {
+		if err := database.DB.Get(&item, "SELECT message_id, filename, mime_type, size, is_chunked, parent_id FROM files WHERE id = ?", id); err != nil || item.MessageID == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
 			return
 		}
@@ -745,7 +745,12 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 
 		c.SetCookie("dl_started", "1", 15, "/", "", false, false)
 
-		if err := tgclient.ServeTelegramFile(c.Request, c.Writer, *item.MessageID, item.Filename, item.Size, cfg); err != nil {
+		// Check if file is chunked - use sidecar for Premium download
+		if item.IsChunked {
+			if err := tgclient.ServeMergedFileSidecar(c.Request, c.Writer, id, *item.MessageID, item.Filename, item.Size, cfg); err != nil {
+				fmt.Println("Sidecar download error:", err)
+			}
+		} else if err := tgclient.ServeTelegramFile(c.Request, c.Writer, *item.MessageID, item.Filename, item.Size, cfg); err != nil {
 			// Handle error
 			fmt.Println("Stream error:", err)
 		}
