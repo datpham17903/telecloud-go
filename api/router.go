@@ -84,40 +84,8 @@ type loginAttempt struct {
 	last  time.Time
 }
 
-// Download progress tracking
-var downloadProgress = make(map[int]*DownloadStatus)
-var downloadProgressMu sync.RWMutex
 
-type DownloadStatus struct {
-	FileID     int    `json:"file_id"`
-	Filename   string `json:"filename"`
-	Status     string `json:"status"` // "preparing", "downloading", "merging", "done", "error"
-	Percent    int    `json:"percent"`
-	Message    string `json:"message"`
-	TotalSize  int64  `json:"total_size"`
-	Downloaded int64  `json:"downloaded"`
-}
 
-func SetDownloadProgress(fileID int, status DownloadStatus) {
-	downloadProgressMu.Lock()
-	defer downloadProgressMu.Unlock()
-	downloadProgress[fileID] = &status
-}
-
-func GetDownloadProgress(fileID int) *DownloadStatus {
-	downloadProgressMu.RLock()
-	defer downloadProgressMu.RUnlock()
-	if s, ok := downloadProgress[fileID]; ok {
-		return s
-	}
-	return nil
-}
-
-func ClearDownloadProgress(fileID int) {
-	downloadProgressMu.Lock()
-	defer downloadProgressMu.Unlock()
-	delete(downloadProgress, fileID)
-}
 
 func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
@@ -377,7 +345,7 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 			c.Header("Access-Control-Allow-Origin", "*")
 			
 			// Send initial status
-			status := GetDownloadProgress(fileID)
+			status := tgclient.GetDownloadProgress(fileID)
 			if status != nil {
 				data, _ := json.Marshal(status)
 				fmt.Fprintf(c.Writer, "data: %s\n\n", data)
@@ -394,7 +362,7 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 				case <-clientGone:
 					return
 				case <-ticker.C:
-					status := GetDownloadProgress(fileID)
+					status := tgclient.GetDownloadProgress(fileID)
 					if status != nil && status.Status != "done" && status.Status != "error" {
 						data, _ := json.Marshal(status)
 						fmt.Fprintf(c.Writer, "data: %s\n\n", data)
@@ -403,7 +371,7 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 						data, _ := json.Marshal(status)
 						fmt.Fprintf(c.Writer, "data: %s\n\n", data)
 						c.Writer.Flush()
-						ClearDownloadProgress(fileID)
+						tgclient.ClearDownloadProgress(fileID)
 						return
 					}
 				}

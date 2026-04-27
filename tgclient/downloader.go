@@ -20,7 +20,39 @@ import (
 var (
 	locationCache = make(map[int]*cachedLocation)
 	cacheMutex    sync.RWMutex
+
+	// Download progress tracking
+	downloadProgress   = make(map[int]*DownloadProgress)
+	downloadProgressMu sync.RWMutex
 )
+
+type DownloadProgress struct {
+	Status    string
+	Percent   int
+	Message   string
+	TotalSize int64
+}
+
+func SetDownloadProgress(fileID int, status DownloadProgress) {
+	downloadProgressMu.Lock()
+	defer downloadProgressMu.Unlock()
+	downloadProgress[fileID] = &status
+}
+
+func GetDownloadProgress(fileID int) *DownloadProgress {
+	downloadProgressMu.RLock()
+	defer downloadProgressMu.RUnlock()
+	if s, ok := downloadProgress[fileID]; ok {
+		return s
+	}
+	return nil
+}
+
+func ClearDownloadProgress(fileID int) {
+	downloadProgressMu.Lock()
+	defer downloadProgressMu.Unlock()
+	delete(downloadProgress, fileID)
+}
 
 type cachedLocation struct {
 	loc       *tg.InputDocumentFileLocation
@@ -106,11 +138,11 @@ func ServeTelegramFile(c *http.Request, w http.ResponseWriter, msgID int, filena
 	}
 
 	// Check if this is a chunked file by looking for chunks in DB
-	var isChunked bool
-	err := database.DB.Get(&isChunked, "SELECT is_chunked FROM files WHERE message_id = ? LIMIT 1", msgID)
-	if err == nil && isChunked {
-		// This is a chunked file - serve merged
-		return ServeMergedFile(c, w, msgID, filename, size, cfg)
+	var item database.File
+	err := database.DB.Get(&item, "SELECT id, is_chunked FROM files WHERE message_id = ? LIMIT 1", msgID)
+	if err == nil && item.IsChunked {
+		// This is a chunked file - serve merged, pass fileID for progress tracking
+		return ServeMergedFile(c, w, item.ID, msgID, filename, size, cfg)
 	}
 
 	reader, err := GetTelegramFileReader(ctx, msgID, size, cfg)
@@ -126,7 +158,7 @@ func ServeTelegramFile(c *http.Request, w http.ResponseWriter, msgID int, filena
 }
 
 // ServeMergedFile downloads all chunks and serves the merged file
-func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename string, size int64, cfg *config.Config) error {
+func ServeMergedFile(c *http.Request, w http.ResponseWriter, fileID int, msgID int, filename string, size int64, cfg *config.Config) error {
 	// Use background context so download isn't canceled when client disconnects
 	// The HTTP response will still be written to, just not tied to the request context
 	ctx := context.Background()
@@ -194,6 +226,14 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 
 		fmt.Printf("[MergeDownload] Downloading chunk %d/%d (msgID: %d)\n", i+1, len(chunks), *chunk.MessageID)
 
+		// Update progress
+		percent := (i * 100) / len(chunks)
+		SetDownloadProgress(parentID, DownloadProgress{
+			Status:  "downloading",
+			Percent: percent,
+			Message: fmt.Sprintf("Downloading chunk %d/%d...", i+1, len(chunks)),
+		})
+
 		// Get chunk size from document metadata on Telegram
 		chunkSize := chunk.Size
 		if chunkSize <= 0 {
@@ -219,6 +259,13 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 
 	outFile.Close()
 
+	// Update progress: serving
+	SetDownloadProgress(parentID, DownloadProgress{
+		Status:  "done",
+		Percent: 100,
+		Message: "Download complete!",
+	})
+
 	// Serve the merged file
 	mergedFile, err := os.Open(mergedPath)
 	if err != nil {
@@ -233,6 +280,13 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", originalSize))
 
 	http.ServeContent(w, c, filename, time.Time{}, mergedFile)
+
+	// Clear progress after a delay (allow SSE to send final status)
+	go func() {
+		time.Sleep(5 * time.Second)
+		ClearDownloadProgress(parentID)
+	}()
+
 	return nil
 }
 
