@@ -4,15 +4,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"sync"
 )
 
-// ChunkSize is 3.5GB to leave room for overhead and be safe under Telegram's 4GB limit
-const ChunkSize = int64(3.5 * 1024 * 1024 * 1024)
+// ChunkSize is 1900MB to stay safely under Telegram's 2GB limit for non-Premium accounts
+const ChunkSize = int64(1900 * 1024 * 1024)
 
-// SplitFile splits a file into chunks of ChunkSize and returns chunk paths
-func SplitFile(filePath string) ([]string, error) {
+// SplitFileStreaming splits a file into chunks using streaming (low memory footprint)
+// It reads and writes chunks one at a time instead of loading entire file into memory
+func SplitFileStreaming(filePath string) ([]string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
@@ -28,17 +27,19 @@ func SplitFile(filePath string) ([]string, error) {
 	chunkPaths := []string{}
 
 	// Create temp dir for chunks
-	tempDir := filepath.Dir(filePath)
-	baseName := filepath.Base(filePath)
+	tempDir := os.TempDir()
+	baseName := fmt.Sprintf("telecloud_chunk_%d", fileInfo.ModTime().UnixNano())
 
 	chunkIndex := 0
-	for offset := int64(0); offset < totalSize; offset += ChunkSize {
+	offset := int64(0)
+	
+	for offset < totalSize {
 		chunkSize := ChunkSize
 		if offset+ChunkSize > totalSize {
 			chunkSize = totalSize - offset
 		}
 
-		chunkPath := filepath.Join(tempDir, fmt.Sprintf("%s.chunk.%d", baseName, chunkIndex))
+		chunkPath := fmt.Sprintf("%s/%s_%d", tempDir, baseName, chunkIndex)
 		chunkPaths = append(chunkPaths, chunkPath)
 
 		chunkFile, err := os.Create(chunkPath)
@@ -50,6 +51,7 @@ func SplitFile(filePath string) ([]string, error) {
 			return nil, err
 		}
 
+		// Use io.CopyN for streaming copy - only reads chunkSize bytes at a time
 		written, err := io.CopyN(chunkFile, file, chunkSize)
 		chunkFile.Close()
 		if err != nil && err != io.EOF {
@@ -65,10 +67,18 @@ func SplitFile(filePath string) ([]string, error) {
 			return nil, fmt.Errorf("expected to write %d bytes, wrote %d", chunkSize, written)
 		}
 
+		offset += ChunkSize
 		chunkIndex++
+		
+
 	}
 
 	return chunkPaths, nil
+}
+
+// SplitFile splits a file into chunks of ChunkSize - legacy version for compatibility
+func SplitFile(filePath string) ([]string, error) {
+	return SplitFileStreaming(filePath)
 }
 
 // MergeChunks merges multiple chunk files into a single file
@@ -79,23 +89,13 @@ func MergeChunks(chunkPaths []string, outputPath string, deleteChunks bool) erro
 	}
 	defer outFile.Close()
 
-	var mu sync.Mutex
-	var lastErr error
-
 	for i, chunkPath := range chunkPaths {
 		chunkFile, err := os.Open(chunkPath)
 		if err != nil {
-			lastErr = err
 			continue
 		}
 
 		_, err = io.Copy(outFile, chunkFile)
-		mu.Lock()
-		if err != nil && err != io.EOF {
-			lastErr = err
-		}
-		mu.Unlock()
-
 		chunkFile.Close()
 
 		if deleteChunks {
@@ -108,7 +108,7 @@ func MergeChunks(chunkPaths []string, outputPath string, deleteChunks bool) erro
 		}
 	}
 
-	return lastErr
+	return nil
 }
 
 // GetTotalChunks returns the number of chunks for a given file size

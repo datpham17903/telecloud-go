@@ -181,8 +181,8 @@ func ProcessCompleteUpload(ctx context.Context, filePath, filename, path, mimeTy
 		totalSize = fileInfo.Size()
 	}
 
-	// Check if file needs chunking (> 4GB)
-	if totalSize > 4*1024*1024*1024 {
+	// Check if file needs chunking (> 2GB for non-Premium accounts)
+	if totalSize > 2*1024*1024*1024 {
 		ProcessChunkedUpload(ctx, filePath, filename, path, mimeType, taskID, cfg, totalSize)
 		return
 	}
