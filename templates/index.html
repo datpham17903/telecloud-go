@@ -859,15 +859,14 @@
                 class="fa-solid fa-xmark"></i></button>
     </div>
 
-    <div x-show="isPreparingDownload" x-cloak
+    <div x-show="isPreparingDownload || (downloadProgress && downloadProgress.status !== 'done' && downloadProgress.status !== 'error')" x-cloak
         class="fixed inset-0 z-[400] flex flex-col items-center justify-center bg-slate-900/60 backdrop-blur-sm"
         x-transition.opacity>
         <i class="fa-solid fa-cloud-arrow-down text-6xl text-blue-400 mb-6 animate-bounce"></i>
-        <div class="text-white text-xl font-bold mb-2 text-center px-4" x-text="t('connecting_tg')"></div>
+        <div class="text-white text-xl font-bold mb-2 text-center px-4" x-text="downloadProgress?.message || t('connecting_tg')"></div>
         <div class="text-white/70 text-sm mb-6" x-text="t('wait_msg')"></div>
-        <div class="w-48 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-            <div class="h-full bg-blue-500 w-1/3 animate-pulse-fast transform translate-x-[-100%]"
-                style="animation: indeterminate 1.5s infinite linear;"></div>
+        <div class="w-64 h-2 bg-slate-700 rounded-full overflow-hidden">
+            <div class="h-full bg-blue-500 transition-all duration-300" :style="\`width: \${downloadProgress?.percent || 0}%\`"></div>
         </div>
     </div>
 
