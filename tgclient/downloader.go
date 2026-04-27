@@ -146,11 +146,11 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 		parentID = *parentFile.ParentID
 	}
 
-	// Get all chunks for this parent (including the parent itself if it has chunks)
+	// Get all chunks for this parent (only records where parent_id matches, excludes parent itself)
 	var chunks []database.File
-	err = database.DB.Select(&chunks, "SELECT * FROM files WHERE parent_id = ? OR id = ? ORDER BY chunk_index", parentID, parentID)
+	err = database.DB.Select(&chunks, "SELECT * FROM files WHERE parent_id = ? ORDER BY chunk_index", parentID)
 	if err != nil || len(chunks) == 0 {
-		return fmt.Errorf("chunks not found")
+		return fmt.Errorf("chunks not found for parent_id %d", parentID)
 	}
 
 	// Sort by chunk index
