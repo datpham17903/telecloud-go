@@ -128,9 +128,7 @@ function cloudApp(initialIsLoggedIn, initialMaxUploadSizeMB, webdavEnabled = fal
                 if (this.isPreparingDownload) {
                     this.isPreparingDownload = false;
                     eventSource.close();
-                    iframe && iframe.remove();
                     link && document.body.removeChild(link);
-                    iframe.remove();
                     this.showToast(this.t('toast_tg_timeout'), 'error');
                 }
             }, 300000);
