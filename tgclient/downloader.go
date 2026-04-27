@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -185,7 +186,7 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 	}
 	defer os.RemoveAll(chunkDir) // Clean up chunk files after merge
 
-	// Download chunks in parallel (max 2 at a time to avoid Telegram rate limit)
+	// Download chunks with staggered parallel approach (avoid Telegram FLOOD)
 	type chunkResult struct {
 		index int
 		path  string
@@ -194,7 +195,7 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 
 	results := make(chan chunkResult, len(chunks))
 	var wg sync.WaitGroup
-	downloadSemaphore := make(chan struct{}, 2) // Limit to 2 concurrent downloads
+	downloadSemaphore := make(chan struct{}, 2) // Max 2 concurrent
 
 	for i, chunk := range chunks {
 		if chunk.MessageID == nil {
@@ -214,7 +215,22 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 				chunkSize = getTelegramDocumentSize(ctx, msgID, cfg)
 			}
 
-			reader, err := GetTelegramFileReader(ctx, msgID, chunkSize, cfg)
+			// Retry logic for FLOOD_WAIT
+			var reader io.ReadSeeker
+			var err error
+			for retry := 0; retry < 3; retry++ {
+				reader, err = GetTelegramFileReader(ctx, msgID, chunkSize, cfg)
+				if err == nil {
+					break
+				}
+				// Check if it's a flood wait error
+				if strings.Contains(err.Error(), "FLOOD_WAIT") {
+					fmt.Printf("[MergeDownload] FLOOD_WAIT for chunk %d, retry %d after 3s...\n", idx+1, retry+1)
+					time.Sleep(3 * time.Second)
+					continue
+				}
+				break
+			}
 			if err != nil {
 				results <- chunkResult{index: idx, err: fmt.Errorf("failed to get chunk %d reader: %v", idx, err)}
 				return
@@ -239,6 +255,9 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename
 			fmt.Printf("[MergeDownload] Chunk %d downloaded: %d bytes\n", idx+1, written)
 			results <- chunkResult{index: idx, path: chunkPath}
 		}(i, *chunk.MessageID, chunk.Size)
+
+		// Stagger start: wait 1s between starting each chunk to avoid flood
+		time.Sleep(1 * time.Second)
 	}
 
 	// Wait for all downloads to complete
