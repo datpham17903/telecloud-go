@@ -127,7 +127,9 @@ func ServeTelegramFile(c *http.Request, w http.ResponseWriter, msgID int, filena
 
 // ServeMergedFile downloads all chunks and serves the merged file
 func ServeMergedFile(c *http.Request, w http.ResponseWriter, msgID int, filename string, size int64, cfg *config.Config) error {
-	ctx := c.Context()
+	// Use background context so download isn't canceled when client disconnects
+	// The HTTP response will still be written to, just not tied to the request context
+	ctx := context.Background()
 
 	// Find the parent file by message_id and get its actual database ID
 	var parentFile database.File
