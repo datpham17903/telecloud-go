@@ -284,55 +284,104 @@ func ProcessChunkedUpload(ctx context.Context, filePath, filename, path, mimeTyp
 		return
 	}
 
-	// Upload each chunk
+	// Upload chunks in parallel (3 at a time)
 	chunkMsgIDs := make([]int, totalChunks)
+	var uploadWg sync.WaitGroup
+	uploadSemaphore := make(chan struct{}, 3) // Limit to 3 concurrent uploads
+	uploadResults := make(chan struct {
+		index int
+		msgID int
+		err   error
+	}, totalChunks)
+
+	UpdateTask(taskID, "uploading_chunk", 0, fmt.Sprintf("Uploading %d chunks in parallel...", totalChunks))
+
 	for i, chunkPath := range chunkPaths {
-		UpdateTask(taskID, "uploading_chunk", (i*100)/totalChunks, fmt.Sprintf("Uploading chunk %d/%d...", i+1, totalChunks))
+		uploadWg.Add(1)
+		go func(idx int, chunkPath string) {
+			defer uploadWg.Done()
+			uploadSemaphore <- struct{}{}        // Acquire semaphore
+			defer func() { <-uploadSemaphore }() // Release semaphore
 
-		chunkFilename := fmt.Sprintf("%s.chunk.%d", filename, i)
-		caption := fmt.Sprintf("Path: %s\nFilename: %s\nChunkIndex: %d\nTotalChunks: %d\nOriginalFilename: %s",
-			path, chunkFilename, i, totalChunks, filename)
+			chunkFilename := fmt.Sprintf("%s.chunk.%d", filename, idx)
+			caption := fmt.Sprintf("Path: %s\nFilename: %s\nChunkIndex: %d\nTotalChunks: %d\nOriginalFilename: %s",
+				path, chunkFilename, idx, totalChunks, filename)
 
-		file, err := up.FromPath(ctx, chunkPath)
-		if err != nil {
-			utils.CleanupChunks(chunkPaths)
-			UpdateTask(taskID, "error", 0, fmt.Sprintf("Failed to upload chunk %d: %s", i, err.Error()))
-			return
-		}
+			file, err := up.FromPath(ctx, chunkPath)
+			if err != nil {
+				uploadResults <- struct {
+					index int
+					msgID int
+					err   error
+				}{index: idx, err: fmt.Errorf("failed to read chunk %d: %s", idx, err.Error())}
+				return
+			}
 
-		docBuilder := message.UploadedDocument(file, html.String(nil, caption)).Filename(chunkFilename).MIME(mimeType)
-		msgBuilder := sender.To(peer)
+			docBuilder := message.UploadedDocument(file, html.String(nil, caption)).Filename(chunkFilename).MIME(mimeType)
+			msgBuilder := sender.To(peer)
 
-		res, err := msgBuilder.Media(ctx, docBuilder)
-		if err != nil {
-			utils.CleanupChunks(chunkPaths)
-			UpdateTask(taskID, "error", 0, fmt.Sprintf("Failed to send chunk %d: %s", i, err.Error()))
-			return
-		}
+			res, err := msgBuilder.Media(ctx, docBuilder)
+			if err != nil {
+				uploadResults <- struct {
+					index int
+					msgID int
+					err   error
+				}{index: idx, err: fmt.Errorf("failed to send chunk %d: %s", idx, err.Error())}
+				return
+			}
 
-		var msgID int
-		if updReq, ok := res.(*tg.Updates); ok {
-			for _, u := range updReq.Updates {
-				if m, ok := u.(*tg.UpdateNewMessage); ok {
-					if msg, ok := m.Message.(*tg.Message); ok {
-						msgID = msg.ID
-						break
-					}
-				} else if m, ok := u.(*tg.UpdateNewChannelMessage); ok {
-					if msg, ok := m.Message.(*tg.Message); ok {
-						msgID = msg.ID
-						break
+			var msgID int
+			if updReq, ok := res.(*tg.Updates); ok {
+				for _, u := range updReq.Updates {
+					if m, ok := u.(*tg.UpdateNewMessage); ok {
+						if msg, ok := m.Message.(*tg.Message); ok {
+							msgID = msg.ID
+							break
+						}
+					} else if m, ok := u.(*tg.UpdateNewChannelMessage); ok {
+						if msg, ok := m.Message.(*tg.Message); ok {
+							msgID = msg.ID
+							break
+						}
 					}
 				}
 			}
+
+			// Clean up chunk file after successful upload
+			os.Remove(chunkPath)
+
+			uploadResults <- struct {
+				index int
+				msgID int
+				err   error
+			}{index: idx, msgID: msgID}
+		}(i, chunkPath)
+	}
+
+	// Collect results
+	go func() {
+		uploadWg.Wait()
+		close(uploadResults)
+	}()
+
+	uploadedCount := 0
+	var uploadErr error
+	for result := range uploadResults {
+		uploadedCount++
+		progress := (uploadedCount * 100) / totalChunks
+		UpdateTask(taskID, "uploading_chunk", progress, fmt.Sprintf("Uploaded %d/%d chunks", uploadedCount, totalChunks))
+
+		if result.err != nil {
+			uploadErr = result.err
+			break
 		}
+		chunkMsgIDs[result.index] = result.msgID
+	}
 
-		chunkMsgIDs[i] = msgID
-
-		// Clean up chunk file after successful upload
-		os.Remove(chunkPath)
-
-		UpdateTask(taskID, "uploading_chunk", ((i + 1) * 100) / totalChunks, fmt.Sprintf("Uploaded chunk %d/%d", i+1, totalChunks))
+	if uploadErr != nil {
+		utils.CleanupChunks(chunkPaths)
+		UpdateTask(taskID, "error", 0, uploadErr.Error())
+		return
 	}
 
 	UpdateTask(taskID, "saving", 95, "Saving to database...")
