@@ -335,48 +335,7 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 			ws.HandleWebSocket(c.Writer, c.Request)
 		})
 
-		// SSE endpoint for download progress
-		api.GET("/download-progress/:id", func(c *gin.Context) {
-			fileID, _ := strconv.Atoi(c.Param("id"))
-			
-			c.Header("Content-Type", "text/event-stream")
-			c.Header("Cache-Control", "no-cache")
-			c.Header("Connection", "keep-alive")
-			c.Header("Access-Control-Allow-Origin", "*")
-			
-			// Send initial status
-			status := tgclient.GetDownloadProgress(fileID)
-			if status != nil {
-				data, _ := json.Marshal(status)
-				fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-				c.Writer.Flush()
-			}
-			
-			// Stream updates
-			ticker := time.NewTicker(500 * time.Millisecond)
-			defer ticker.Stop()
-			
-			clientGone := c.Request.Context().Done()
-			for {
-				select {
-				case <-clientGone:
-					return
-				case <-ticker.C:
-					status := tgclient.GetDownloadProgress(fileID)
-					if status != nil && status.Status != "done" && status.Status != "error" {
-						data, _ := json.Marshal(status)
-						fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-						c.Writer.Flush()
-					} else if status != nil {
-						data, _ := json.Marshal(status)
-						fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-						c.Writer.Flush()
-						tgclient.ClearDownloadProgress(fileID)
-						return
-					}
-				}
-			}
-		})
+
 
 		api.GET("/files", func(c *gin.Context) {
 			path := c.Query("path")
@@ -720,6 +679,49 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 			tgclient.ServeTelegramFile(c.Request, c.Writer, *item.MessageID, item.Filename, item.Size, cfg)
 		})
 	}
+
+	// SSE endpoint for download progress (outside auth to work with EventSource)
+	r.GET("/download-progress/:id", func(c *gin.Context) {
+		fileID, _ := strconv.Atoi(c.Param("id"))
+		
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+		
+		// Send initial status
+		status := tgclient.GetDownloadProgress(fileID)
+		if status != nil {
+			data, _ := json.Marshal(status)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+			c.Writer.Flush()
+		}
+		
+		// Stream updates
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		
+		clientGone := c.Request.Context().Done()
+		for {
+			select {
+			case <-clientGone:
+				return
+			case <-ticker.C:
+				status := tgclient.GetDownloadProgress(fileID)
+				if status != nil && status.Status != "done" && status.Status != "error" {
+					data, _ := json.Marshal(status)
+					fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+					c.Writer.Flush()
+				} else if status != nil {
+					data, _ := json.Marshal(status)
+					fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+					c.Writer.Flush()
+					tgclient.ClearDownloadProgress(fileID)
+					return
+				}
+			}
+		}
+	})
 
 	r.GET("/download/:id", authMiddleware(), func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))

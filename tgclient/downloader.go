@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -234,25 +235,47 @@ func ServeMergedFile(c *http.Request, w http.ResponseWriter, fileID int, msgID i
 			Message: fmt.Sprintf("Downloading chunk %d/%d...", i+1, len(chunks)),
 		})
 
-		// Get chunk size from document metadata on Telegram
-		chunkSize := chunk.Size
-		if chunkSize <= 0 {
-			// If chunk size is 0, we need to get it from Telegram
-			chunkSize = getTelegramDocumentSize(ctx, *chunk.MessageID, cfg)
+		// Download with retry for FLOOD errors
+		var written int64
+		var downloadErr error
+		for retry := 0; retry < 5; retry++ {
+			// Get chunk size from document metadata on Telegram
+			chunkSize := chunk.Size
+			if chunkSize <= 0 {
+				chunkSize = getTelegramDocumentSize(ctx, *chunk.MessageID, cfg)
+			}
+
+			reader, err := GetTelegramFileReader(ctx, *chunk.MessageID, chunkSize, cfg)
+			if err != nil {
+				downloadErr = err
+				if strings.Contains(err.Error(), "FLOOD") {
+					fmt.Printf("[MergeDownload] FLOOD getting chunk %d, waiting 10s before retry %d...\n", i, retry+1)
+					time.Sleep(10 * time.Second)
+					continue
+				}
+				break
+			}
+
+			written, downloadErr = io.Copy(outFile, reader)
+			if downloadErr == nil {
+				break
+			}
+			// Check if it's a FLOOD error
+			if strings.Contains(downloadErr.Error(), "FLOOD") {
+				fmt.Printf("[MergeDownload] FLOOD copying chunk %d, waiting 10s before retry %d...\n", i, retry+1)
+				time.Sleep(10 * time.Second)
+				// Seek back to beginning of file to retry
+				outFile.Seek(0, 0)
+				outFile.Truncate(0)
+				continue
+			}
+			break
 		}
 
-		reader, err := GetTelegramFileReader(ctx, *chunk.MessageID, chunkSize, cfg)
-		if err != nil {
+		if downloadErr != nil {
 			outFile.Close()
 			os.Remove(mergedPath)
-			return fmt.Errorf("failed to get chunk %d reader: %v", i, err)
-		}
-
-		written, err := io.Copy(outFile, reader)
-		if err != nil {
-			outFile.Close()
-			os.Remove(mergedPath)
-			return fmt.Errorf("failed to copy chunk %d: %v", i, err)
+			return fmt.Errorf("failed to download chunk %d: %v", i, downloadErr)
 		}
 		fmt.Printf("[MergeDownload] Chunk %d downloaded: %d bytes\n", i+1, written)
 	}
