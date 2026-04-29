@@ -20,7 +20,14 @@ type File struct {
 	IsFolder   bool      `db:"is_folder" json:"is_folder"`
 	ThumbPath  *string   `db:"thumb_path" json:"thumb_path"`
 	CreatedAt  time.Time `db:"created_at" json:"created_at"`
-	
+
+	// Chunking support
+	IsChunked    bool   `db:"is_chunked" json:"is_chunked"`
+	ParentID     *int   `db:"parent_id" json:"parent_id"`
+	ChunkIndex   *int   `db:"chunk_index" json:"chunk_index"`
+	TotalChunks  *int   `db:"total_chunks" json:"total_chunks"`
+	OriginalSize *int64 `db:"original_size" json:"original_size"`
+
 	// Virtual fields
 	DirectToken string `db:"-" json:"direct_token,omitempty"`
 	HasThumb    bool   `db:"-" json:"has_thumb"`

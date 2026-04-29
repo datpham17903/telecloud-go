@@ -494,7 +494,7 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 				path = "/"
 			}
 			var files []database.File
-			err := database.DB.Select(&files, "SELECT * FROM files WHERE path = ? ORDER BY is_folder DESC, id DESC", path)
+			err := database.DB.Select(&files, "SELECT * FROM files WHERE path = ? AND parent_id IS NULL ORDER BY is_folder DESC, id DESC", path)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
@@ -933,7 +933,7 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 	r.GET("/download/:id", authMiddleware(), func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 		var item database.File
-		if err := database.DB.Get(&item, "SELECT message_id, filename, mime_type, size FROM files WHERE id = ?", id); err != nil || item.MessageID == nil {
+		if err := database.DB.Get(&item, "SELECT message_id, filename, mime_type, size, is_chunked, total_chunks, original_size FROM files WHERE id = ?", id); err != nil || item.MessageID == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
 			return
 		}
@@ -943,6 +943,35 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 			c.Header("Content-Type", *item.MimeType)
 		}
 		c.SetCookie("dl_started", "1", 15, "/", "", false, false)
+
+		// Check if this is a chunked file (parent file)
+		if item.IsChunked && item.TotalChunks != nil && *item.TotalChunks > 1 {
+			// Download and merge chunks
+			largeFileTempDir := cfg.LargeFileTempDir
+			if largeFileTempDir == "" {
+				largeFileTempDir = "/opt/telecloud-temp"
+			}
+			os.MkdirAll(largeFileTempDir, 0755)
+			outputPath := filepath.Join(largeFileTempDir, fmt.Sprintf("download_%d_%s", id, item.Filename))
+
+			var origSize int64
+			if item.OriginalSize != nil {
+				origSize = *item.OriginalSize
+			} else {
+				origSize = item.Size
+			}
+
+			err := tgclient.DownloadAndMergeChunkedFile(c.Request.Context(), *item.MessageID, *item.TotalChunks, origSize, item.Filename, outputPath, cfg)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+
+			// Serve the merged file
+			c.File(outputPath)
+			os.Remove(outputPath) // Clean up after download
+			return
+		}
 
 		if err := tgclient.ServeTelegramFile(c.Request, c.Writer, *item.MessageID, item.Filename, item.Size, cfg); err != nil {
 			// Handle error

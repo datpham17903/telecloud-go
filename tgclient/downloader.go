@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"telecloud/config"
-
 	"github.com/gotd/td/tg"
+	"telecloud/database"
 )
 
 var (
@@ -216,4 +218,67 @@ func GetTelegramFileReader(ctx context.Context, msgID int, size int64, cfg *conf
 	}
 
 	return reader, nil
+}
+
+// DownloadAndMergeChunkedFile downloads all chunks and merges them
+func DownloadAndMergeChunkedFile(ctx context.Context, msgID int, totalChunks int, originalSize int64, filename string, outputPath string, cfg *config.Config) error {
+	largeFileTempDir := cfg.LargeFileTempDir
+	if largeFileTempDir == "" {
+		largeFileTempDir = "/opt/telecloud-temp"
+	}
+	os.MkdirAll(largeFileTempDir, 0755)
+
+	chunkDir := filepath.Join(largeFileTempDir, fmt.Sprintf("merge_%d", msgID))
+	os.MkdirAll(chunkDir, 0755)
+	defer os.RemoveAll(chunkDir)
+
+	for i := 0; i < totalChunks; i++ {
+		var chunkMsgID int
+		err := database.DB.Get(&chunkMsgID, "SELECT message_id FROM files WHERE parent_id = (SELECT id FROM files WHERE message_id = ?) AND chunk_index = ?", msgID, i)
+		if err != nil {
+			return fmt.Errorf("failed to get chunk %d info: %w", i, err)
+		}
+
+		reader, err := GetTelegramFileReader(ctx, chunkMsgID, -1, cfg)
+		if err != nil {
+			return fmt.Errorf("failed to download chunk %d: %w", i, err)
+		}
+
+		chunkPath := filepath.Join(chunkDir, fmt.Sprintf("%s.chunk.%d", filename, i))
+		outFile, err := os.Create(chunkPath)
+		if err != nil {
+			return fmt.Errorf("failed to create chunk file %d: %w", i, err)
+		}
+
+		_, err = io.Copy(outFile, reader)
+		outFile.Close()
+		reader.(io.Closer).Close()
+		if err != nil {
+			return fmt.Errorf("failed to save chunk %d: %w", i, err)
+		}
+	}
+
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outFile.Close()
+
+	for i := 0; i < totalChunks; i++ {
+		chunkPath := filepath.Join(chunkDir, fmt.Sprintf("%s.chunk.%d", filename, i))
+		chunkFile, err := os.Open(chunkPath)
+		if err != nil {
+			return fmt.Errorf("failed to open chunk %d: %w", i, err)
+		}
+
+		_, err = io.Copy(outFile, chunkFile)
+		chunkFile.Close()
+		if err != nil {
+			return fmt.Errorf("failed to write chunk %d to output: %w", i, err)
+		}
+
+		os.Remove(chunkPath)
+	}
+
+	return nil
 }

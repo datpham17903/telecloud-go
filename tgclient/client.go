@@ -74,6 +74,8 @@ func (termAuth) Code(ctx context.Context, sentCode *tg.AuthSentCode) (string, er
 func InitClient(cfg *config.Config, runAuthFlow bool) error {
 	sessionDir := cfg.SessionFile
 
+	// Auto-select best DC based on latency
+	dcList := dcs.Prod()
 	options := telegram.Options{
 		SessionStorage: &session.FileStorage{
 			Path: sessionDir,
@@ -83,6 +85,8 @@ func InitClient(cfg *config.Config, runAuthFlow bool) error {
 			SystemVersion: "Linux",
 			AppVersion:    cfg.Version,
 		},
+		DC:     5, // Default to DC5 (Tokyo) for lowest latency in Vietnam
+		DCList: dcList,
 	}
 
 	if cfg.ProxyURL != "" {

@@ -17,6 +17,7 @@ type Config struct {
 	LogGroupID      string
 	Port            string
 	TempDir         string
+	LargeFileTempDir string
 	ProxyURL        string
 	Version         string
 	SessionFile     string
@@ -48,7 +49,8 @@ func Load() *Config {
 		ThumbsDir:       getEnv("THUMBS_DIR", "static/thumbs"),
 		LogGroupID:      logGroupID,
 		Port:            getEnv("PORT", "8091"),
-		TempDir:         getEnv("TEMP_DIR", os.TempDir()+"/telecloud_temp_chunks"),
+		TempDir:          getEnv("TEMP_DIR", os.TempDir()+"/telecloud_temp_chunks"),
+		LargeFileTempDir: getEnv("LARGE_FILE_TEMP_DIR", "/opt/telecloud-temp"),
 		ProxyURL:        getEnv("PROXY_URL", ""),
 		SessionFile:     getEnv("SESSION_FILE", "session.json"),
 		FFMPEGPath:      getEnv("FFMPEG_PATH", "ffmpeg"),
