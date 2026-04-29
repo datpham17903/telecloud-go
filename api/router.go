@@ -811,6 +811,24 @@ func SetupRouter(cfg *config.Config, contentFS fs.FS) *gin.Engine {
 				}
 			} else {
 				var msgIDsToDelete []int
+				
+				// If this is a chunked file (parent), also get all chunk message IDs
+				if item.IsChunked && item.TotalChunks != nil && *item.TotalChunks > 1 {
+					var chunks []database.File
+					database.DB.Select(&chunks, "SELECT message_id FROM files WHERE parent_id = ?", id)
+					for _, chunk := range chunks {
+						if chunk.MessageID != nil {
+							var count int
+							database.DB.Get(&count, "SELECT COUNT(*) FROM files WHERE message_id = ?", *chunk.MessageID)
+							if count <= 1 {
+								msgIDsToDelete = append(msgIDsToDelete, *chunk.MessageID)
+							}
+						}
+					}
+					// Delete all chunk records first
+					database.DB.Exec("DELETE FROM files WHERE parent_id = ?", id)
+				}
+				
 				if item.MessageID != nil {
 					var count int
 					database.DB.Get(&count, "SELECT COUNT(*) FROM files WHERE message_id = ?", *item.MessageID)
