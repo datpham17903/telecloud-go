@@ -75,6 +75,7 @@ func (c *BlockCache) removeOldest() {
 
 var (
 	locationCache    = make(map[int]*cachedLocation)
+	sessionLocCache  = make(map[sessionLocKey]*cachedLocation) // per-(message, session) locations
 	cacheMutex       sync.RWMutex
 	globalChunkCache = NewBlockCache(128) // 128 MB maximum buffer size
 
@@ -99,9 +100,21 @@ func init() {
 					delete(locationCache, k)
 				}
 			}
+			for k, v := range sessionLocCache {
+				if now.After(v.expiresAt) {
+					delete(sessionLocCache, k)
+				}
+			}
 			cacheMutex.Unlock()
 		}
 	}()
+}
+
+// sessionLocKey identifies a file location: it is only valid with the session
+// (api) that resolved it.
+type sessionLocKey struct {
+	msgID int
+	api   *tg.Client
 }
 
 type cachedLocation struct {
@@ -114,7 +127,7 @@ type tgFileReader struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	api    *tg.Client
-	loc    tg.InputFileLocationClass
+	locs   map[*tg.Client]tg.InputFileLocationClass // per-session file locations, guarded by locMu
 	size   int64
 	offset int64
 	msgID  int
@@ -131,7 +144,8 @@ type tgFileReader struct {
 	prefetchDepth    int                     // how many chunks to keep in flight ahead of the cursor
 	prefetchMu       sync.Mutex
 	prefetchSem      chan struct{} // caps concurrent prefetch goroutines for this reader
-	locMu            sync.Mutex    // Protects loc and api updates during file reference refreshes
+	locMu            sync.Mutex    // Protects locs and locFlights
+	locFlights       map[*tg.Client]*locFlight
 
 	// fetch performs the actual chunk download. Indirected so tests can run the
 	// caching/prefetch logic without touching the network.
@@ -289,8 +303,17 @@ func (r *tgFileReader) triggerPrefetch(offset int64, limit int64) {
 			<-r.prefetchSem
 		}()
 
-		// Same session as the synchronous path (r.loc is bound to r.api)
-		data, err := r.fetch(r.api, offset, limit)
+		// Spread prefetches across sessions; each uses its own file location. If
+		// a session cannot resolve the file, use the reader's own session.
+		api := pickDownloadAPI()
+		if api == nil {
+			api = r.api
+		} else if api != r.api {
+			if _, err := r.locFor(api); err != nil {
+				api = r.api
+			}
+		}
+		data, err := r.fetch(api, offset, limit)
 		if err != nil {
 			return
 		}
@@ -308,20 +331,92 @@ func (r *tgFileReader) triggerPrefetch(offset int64, limit int64) {
 	}()
 }
 
+type locFlight struct {
+	done chan struct{}
+	loc  tg.InputFileLocationClass
+	err  error
+}
+
+// locFor returns the file location valid for the given session, resolving it
+// once (single-flight per session) if this reader has not used it yet.
+func (r *tgFileReader) locFor(api *tg.Client) (tg.InputFileLocationClass, error) {
+	r.locMu.Lock()
+	if loc, ok := r.locs[api]; ok {
+		r.locMu.Unlock()
+		return loc, nil
+	}
+	if f, ok := r.locFlights[api]; ok {
+		r.locMu.Unlock()
+		select {
+		case <-f.done:
+			return f.loc, f.err
+		case <-r.ctx.Done():
+			return nil, r.ctx.Err()
+		}
+	}
+	f := &locFlight{done: make(chan struct{})}
+	if r.locFlights == nil {
+		r.locFlights = make(map[*tg.Client]*locFlight)
+	}
+	r.locFlights[api] = f
+	r.locMu.Unlock()
+
+	cacheMutex.RLock()
+	cached, ok := sessionLocCache[sessionLocKey{r.msgID, api}]
+	cacheMutex.RUnlock()
+	if ok && time.Now().Before(cached.expiresAt) {
+		f.loc = cached.loc
+	} else {
+		f.loc, f.err = resolveLocation(r.ctx, api, r.msgID, r.cfg)
+		if f.err == nil && f.loc == nil {
+			f.err = fmt.Errorf("no location for msgID %d", r.msgID)
+		}
+	}
+	if f.err == nil {
+		r.setLoc(api, f.loc)
+	}
+	r.locMu.Lock()
+	delete(r.locFlights, api)
+	r.locMu.Unlock()
+	close(f.done)
+	return f.loc, f.err
+}
+
+// setLoc records a freshly resolved location for one session only.
+func (r *tgFileReader) setLoc(api *tg.Client, loc tg.InputFileLocationClass) {
+	r.locMu.Lock()
+	if r.locs == nil {
+		r.locs = make(map[*tg.Client]tg.InputFileLocationClass)
+	}
+	r.locs[api] = loc
+	r.locMu.Unlock()
+
+	exp := time.Now().Add(1 * time.Hour)
+	cacheMutex.Lock()
+	sessionLocCache[sessionLocKey{r.msgID, api}] = &cachedLocation{loc: loc, api: api, expiresAt: exp}
+	if api == r.api {
+		locationCache[r.msgID] = &cachedLocation{loc: loc, api: api, expiresAt: exp}
+	}
+	cacheMutex.Unlock()
+}
+
 // Seams so tests can exercise fetchChunk without Telegram sessions.
 var (
 	resolveLocation = resolveMediaLocation
 	uploadGetFile   = func(ctx context.Context, api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
 		return api.UploadGetFile(ctx, req)
 	}
-	pickAltAPI      = GetAPI
+	pickAltAPI = GetAPI
+	// pickDownloadAPI selects the session for a background prefetch.
+	pickDownloadAPI = GetAPI
 	markBotCooldown = MarkBotCooldown
 )
 
 func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]byte, error) {
-	r.locMu.Lock()
-	loc := r.loc
-	r.locMu.Unlock()
+	loc, err := r.locFor(api)
+	if err != nil {
+		return nil, err
+	}
 
 	req := &tg.UploadGetFileRequest{
 		Precise:  true,
@@ -331,7 +426,6 @@ func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]
 	}
 
 	var res tg.UploadFileClass
-	var err error
 	refreshed := false
 	for attempt := 0; attempt < 3; attempt++ {
 		res, err = uploadGetFile(r.ctx, api, req)
@@ -362,16 +456,10 @@ func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]
 				continue
 			}
 
-			// A location is only valid with the session that resolved it; only
-			// r.api's location is shared between goroutines.
-			shared := api == r.api
-
+			// Another goroutine may already have refreshed this session's location.
 			r.locMu.Lock()
-			// If another thread (e.g. prefetch or main read) has already refreshed the location,
-			// req.Location would be different from the updated r.loc.
-			// In that case, we can just use the new r.loc and retry immediately.
-			if shared && r.loc != req.Location {
-				req.Location = r.loc
+			if cur := r.locs[api]; cur != req.Location {
+				req.Location = cur
 				r.locMu.Unlock()
 				refreshed = true
 				attempt-- // Do not consume a retry attempt
@@ -382,31 +470,18 @@ func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]
 
 			log.Printf("[downloader] File reference expired/invalid for msgID %d, re-resolving...", r.msgID)
 
-			// Invalidate local and global cache
+			// Invalidate this session's cached location only.
 			cacheMutex.Lock()
-			delete(locationCache, r.msgID)
+			delete(sessionLocCache, sessionLocKey{r.msgID, api})
+			if api == r.api {
+				delete(locationCache, r.msgID)
+			}
 			cacheMutex.Unlock()
 
-			// Re-resolve
 			newLoc, errResolve := resolveLocation(r.ctx, api, r.msgID, r.cfg)
-			if errResolve != nil && api != Client.API() {
-				newLoc, errResolve = resolveMediaLocation(r.ctx, Client.API(), r.msgID, r.cfg)
-			}
 
 			if errResolve == nil && newLoc != nil {
-				if shared {
-					r.locMu.Lock()
-					r.loc = newLoc
-					r.locMu.Unlock()
-
-					cacheMutex.Lock()
-					locationCache[r.msgID] = &cachedLocation{
-						loc:       newLoc,
-						api:       api,
-						expiresAt: time.Now().Add(1 * time.Hour),
-					}
-					cacheMutex.Unlock()
-				}
+				r.setLoc(api, newLoc)
 
 				req.Location = newLoc
 				refreshed = true
@@ -431,17 +506,7 @@ func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]
 				// A location only works with the session that resolved it, so resolve
 				// one for the new session (local to this call); on failure wait it out.
 				if next := pickAltAPI(); next != api {
-					nextLoc := req.Location
-					if next == r.api {
-						r.locMu.Lock()
-						nextLoc = r.loc
-						r.locMu.Unlock()
-					} else if l, errNext := resolveLocation(r.ctx, next, r.msgID, r.cfg); errNext == nil && l != nil {
-						nextLoc = l
-					} else {
-						next = nil
-					}
-					if next != nil {
+					if nextLoc, errNext := r.locFor(next); errNext == nil {
 						api = next
 						req.Location = nextLoc
 						waitDuration = 0
@@ -747,7 +812,7 @@ func newTGFileReader(ctx context.Context, cancel context.CancelFunc, api *tg.Cli
 		ctx:              ctx,
 		cancel:           cancel,
 		api:              api,
-		loc:              loc,
+		locs:             map[*tg.Client]tg.InputFileLocationClass{api: loc},
 		size:             size,
 		msgID:            msgID,
 		cfg:              cfg,
