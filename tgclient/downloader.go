@@ -519,7 +519,9 @@ func ServeTelegramFile(c *http.Request, w http.ResponseWriter, file database.Fil
 
 	// Allow browser/player to seek and cache the stream
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "private, max-age=3600")
+	}
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	// Set Content-Type if not already set

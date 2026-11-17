@@ -19,6 +19,9 @@ import (
 
 const shareSessionTTL = 24 * time.Hour
 
+// serveTelegramFile is a seam for tests.
+var serveTelegramFile = tgclient.ServeTelegramFile
+
 // checkShareAuth returns true if either the share has no password or the
 // request carries a still-valid share_sessions row referenced by the cookie.
 // The bcrypt hash itself is never sent to the client.
@@ -131,6 +134,7 @@ func (h *Handler) handleGetSharedFile(c *gin.Context) {
 			}
 		}
 		if ok {
+			embed = prepareDiscordVideoEmbed(c, item, embed)
 			c.Render(http.StatusOK, render.HTML{Template: discordEmbedTemplate, Data: embed})
 			return
 		}
@@ -229,7 +233,12 @@ func (h *Handler) handleStreamSharedFile(c *gin.Context) {
 		c.Header("Content-Type", mime)
 	}
 
-	if err := tgclient.ServeTelegramFile(c.Request, c.Writer, item, h.cfg); err != nil {
+	// Public share streams may be cached by a CDN (Cloudflare); protected ones stay private.
+	if item.SharePassword == nil || *item.SharePassword == "" {
+		c.Header("Cache-Control", "public, max-age=86400")
+	}
+
+	if err := serveTelegramFile(c.Request, c.Writer, item, h.cfg); err != nil {
 		fmt.Printf("[SharedStream] Error serving file %s: %v\n", token, err)
 	}
 
