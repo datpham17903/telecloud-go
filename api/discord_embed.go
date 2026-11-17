@@ -66,7 +66,7 @@ func embedDimensions(thumbPath *string) (int, int) {
 	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
 		return 0, 0
 	}
-	return 1280, cfg.Height * 1280 / cfg.Width
+	return 1280, (cfg.Height*1280 + cfg.Width/2) / cfg.Width
 }
 
 func buildDiscordEmbed(item database.File, token, origin string, maxVideoBytes int64) (discordEmbed, bool) {
@@ -81,7 +81,7 @@ func buildDiscordEmbed(item database.File, token, origin string, maxVideoBytes i
 	}
 
 	switch {
-	case mime == "video/mp4" || mime == "video/quicktime":
+	case mime == "video/mp4" || mime == "video/webm" || mime == "video/quicktime":
 		if item.Size > maxVideoBytes {
 			return discordEmbed{}, false
 		}
@@ -94,7 +94,7 @@ func buildDiscordEmbed(item database.File, token, origin string, maxVideoBytes i
 		embed.VideoType = mime
 		embed.VideoWidth, embed.VideoHeight = w, h
 		return embed, true
-	case strings.HasPrefix(mime, "image/"):
+	case discordImageMimes[mime]:
 		if item.Size > discordEmbedMaxImageBytes {
 			return discordEmbed{}, false
 		}
@@ -103,4 +103,8 @@ func buildDiscordEmbed(item database.File, token, origin string, maxVideoBytes i
 		return embed, true
 	}
 	return discordEmbed{}, false
+}
+
+var discordImageMimes = map[string]bool{
+	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/avif": true,
 }

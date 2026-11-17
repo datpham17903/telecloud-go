@@ -60,6 +60,15 @@ func TestBuildDiscordEmbed(t *testing.T) {
 		{"mov portrait", "a.mov", "video/quicktime", 10 << 20, embedTestThumb(t, 320, 569), true, discordEmbed{
 			ImageURL: origin + "/s/tok/thumb", VideoURL: origin + "/s/tok/stream/a.mov",
 			VideoType: "video/quicktime", VideoWidth: 1280, VideoHeight: 2276}},
+		{"webm", "a.webm", "video/webm", 10 << 20, embedTestThumb(t, 320, 180), true, discordEmbed{
+			ImageURL: origin + "/s/tok/thumb", VideoURL: origin + "/s/tok/stream/a.webm",
+			VideoType: "video/webm", VideoWidth: 1280, VideoHeight: 720}},
+		{"odd height", "a.mp4", "video/mp4", 10 << 20, embedTestThumb(t, 320, 181), true, discordEmbed{
+			ImageURL: origin + "/s/tok/thumb", VideoURL: origin + "/s/tok/stream/a.mp4",
+			VideoType: "video/mp4", VideoWidth: 1280, VideoHeight: 724}},
+		{"svg", "a.svg", "image/svg+xml", 1 << 20, embedTestThumb(t, 320, 240), false, discordEmbed{}},
+		{"gif", "a.gif", "image/gif", 1 << 20, embedTestThumb(t, 320, 240), true, discordEmbed{
+			ImageURL: origin + "/s/tok/stream/a.gif", ImageWidth: 1280, ImageHeight: 960}},
 		{"mkv", "a.mkv", "video/x-matroska", 10 << 20, embedTestThumb(t, 320, 180), false, discordEmbed{}},
 		{"video without thumb", "clip.mp4", "video/mp4", 10 << 20, nil, false, discordEmbed{}},
 		{"video thumb missing on disk", "clip.mp4", "video/mp4", 10 << 20, &missing, false, discordEmbed{}},
