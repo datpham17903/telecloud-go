@@ -138,9 +138,6 @@ type tgFileReader struct {
 	fetch func(api *tg.Client, offset int64, limit int64) ([]byte, error)
 }
 
-// pickDownloadAPI selects the session used for background prefetches.
-var pickDownloadAPI = GetAPI
-
 func (r *tgFileReader) Close() error {
 	if r.cancel != nil {
 		r.cancel()
@@ -236,9 +233,9 @@ func (r *tgFileReader) fillPrefetchWindow(fromChunk int64, chunkSize int64) {
 	}
 }
 
-// triggerPrefetch launches a background goroutine to fetch one chunk using a
-// different bot than the synchronous path. This spreads the Telegram rate-limit
-// across sessions without overwhelming a single DC.
+// triggerPrefetch launches a background goroutine to fetch one chunk using the
+// reader's own session: file references are session-specific, so another bot
+// would get FILE_REFERENCE_EXPIRED and clobber the shared location.
 func (r *tgFileReader) triggerPrefetch(offset int64, limit int64) {
 	if offset >= r.size {
 		return
@@ -292,8 +289,8 @@ func (r *tgFileReader) triggerPrefetch(offset int64, limit int64) {
 			<-r.prefetchSem
 		}()
 
-		// Use a different bot than the one used for the synchronous path
-		data, err := r.fetch(pickDownloadAPI(), offset, limit)
+		// Same session as the synchronous path (r.loc is bound to r.api)
+		data, err := r.fetch(r.api, offset, limit)
 		if err != nil {
 			return
 		}

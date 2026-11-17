@@ -26,11 +26,6 @@ func newTestReader(t *testing.T, content []byte, depth int, fetchDelay time.Dura
 	globalChunkCache = NewBlockCache(128)
 	globalPrefetchSem = make(chan struct{}, 32)
 
-	// No Telegram sessions exist in tests; keep prefetch off the real bot pool.
-	prev := pickDownloadAPI
-	pickDownloadAPI = func() *tg.Client { return nil }
-	t.Cleanup(func() { pickDownloadAPI = prev })
-
 	msgID := int(nextTestMsgID.Add(1))
 	rec := &fetchRecorder{perOffset: map[int64]int{}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -45,9 +40,10 @@ func newTestReader(t *testing.T, content []byte, depth int, fetchDelay time.Dura
 		prefetchInflight: make(map[int64]chan struct{}),
 		prefetchDepth:    depth,
 		prefetchSem:      make(chan struct{}, depth),
+		api:              testSessionAPI,
 	}
-	r.fetch = func(_ *tg.Client, offset int64, limit int64) ([]byte, error) {
-		rec.record(offset)
+	r.fetch = func(api *tg.Client, offset int64, limit int64) ([]byte, error) {
+		rec.record(api, offset)
 		if fetchDelay > 0 {
 			time.Sleep(fetchDelay)
 		}
@@ -69,16 +65,21 @@ func newTestReader(t *testing.T, content []byte, depth int, fetchDelay time.Dura
 
 var nextTestMsgID atomic.Int64
 
+// testSessionAPI is the reader's own session; fetches must always use it.
+var testSessionAPI = &tg.Client{}
+
 type fetchRecorder struct {
 	mu        sync.Mutex
 	perOffset map[int64]int
+	apis      []*tg.Client
 	total     int
 }
 
-func (f *fetchRecorder) record(offset int64) {
+func (f *fetchRecorder) record(api *tg.Client, offset int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.perOffset[offset]++
+	f.apis = append(f.apis, api)
 	f.total++
 }
 
@@ -294,4 +295,27 @@ func min64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// Telegram file references are bound to the session that resolved them, so every
+// fetch (synchronous and prefetch) must use the reader's own session.
+func TestReaderFetchesUseOwnSession(t *testing.T) {
+	content := makeContent(6 * testChunkSize)
+	r, rec := newTestReader(t, content, 4, 0)
+
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatal(err)
+	}
+	r.waitForPrefetches()
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.apis) == 0 {
+		t.Fatal("no fetches recorded")
+	}
+	for i, api := range rec.apis {
+		if api != testSessionAPI {
+			t.Fatalf("fetch %d used a different session than the reader's", i)
+		}
+	}
 }
