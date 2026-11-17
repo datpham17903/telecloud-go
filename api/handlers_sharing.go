@@ -126,15 +126,18 @@ func (h *Handler) handleGetSharedFile(c *gin.Context) {
 
 	if isDiscordBot(c.GetHeader("User-Agent")) {
 		maxVideo := int64(h.cfg.DiscordEmbedMaxVideoMB) << 20
-		embed, ok := buildDiscordEmbed(item, token, getRequestOrigin(c), maxVideo)
+		origin, prewarm := h.discordEmbedOrigin(c)
+		embed, ok := buildDiscordEmbed(item, token, origin, maxVideo)
 		if !ok {
 			if p := h.ensureDiscordThumb(item); p != nil {
 				item.ThumbPath = p
-				embed, ok = buildDiscordEmbed(item, token, getRequestOrigin(c), maxVideo)
+				embed, ok = buildDiscordEmbed(item, token, origin, maxVideo)
 			}
 		}
 		if ok {
-			embed = prepareDiscordVideoEmbed(c, item, embed)
+			if prewarm {
+				embed = prepareDiscordVideoEmbed(item, embed)
+			}
 			c.Render(http.StatusOK, render.HTML{Template: discordEmbedTemplate, Data: embed})
 			return
 		}
@@ -239,6 +242,10 @@ func (h *Handler) handleStreamSharedFile(c *gin.Context) {
 	}
 
 	if err := serveTelegramFile(c.Request, c.Writer, item, h.cfg); err != nil {
+		if !c.Writer.Written() {
+			c.Header("Cache-Control", "no-store")
+			c.AbortWithStatus(http.StatusBadGateway)
+		}
 		fmt.Printf("[SharedStream] Error serving file %s: %v\n", token, err)
 	}
 

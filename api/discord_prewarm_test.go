@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -20,10 +21,11 @@ import (
 
 const (
 	prewarmDiscordUA = "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
-	prewarmVideoURL  = "https://example.com/s/vid/stream/clip.mp4"
+	prewarmHost      = "telecloud-cf.example.com"
+	prewarmVideoURL  = "https://" + prewarmHost + "/s/vid/stream/clip.mp4"
 )
 
-func newPrewarmRouter(t *testing.T) *gin.Engine {
+func newPrewarmRouter(t *testing.T) (*gin.Engine, *config.Config) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	dbPath := filepath.Join(t.TempDir(), "prewarm.db")
@@ -58,19 +60,30 @@ func newPrewarmRouter(t *testing.T) *gin.Engine {
 	tmpl := template.Must(template.New("share.html").Parse("SHARE_PAGE"))
 	r := gin.New()
 	r.SetHTMLTemplate(tmpl)
-	h := &Handler{cfg: &config.Config{DiscordEmbedMaxVideoMB: 1024}}
+	cfg := &config.Config{DiscordEmbedMaxVideoMB: 1024, DiscordCFBaseURL: "https://" + prewarmHost}
+	h := &Handler{cfg: cfg}
 	r.GET("/s/:token", h.handleGetSharedFile)
 	r.GET("/s/:token/stream/:filename", h.handleStreamSharedFile)
 
 	prevWarm, prevWait, prevServe := warmFetch, discordWarmWait, serveTelegramFile
 	t.Cleanup(func() { warmFetch, discordWarmWait, serveTelegramFile = prevWarm, prevWait, prevServe })
-	warmedURLs.Range(func(k, _ any) bool { warmedURLs.Delete(k); return true })
-	return r
+	warmedFiles.Range(func(k, _ any) bool { warmedFiles.Delete(k); return true })
+	warmFailures.Range(func(k, _ any) bool { warmFailures.Delete(k); return true })
+	return r, cfg
 }
 
 func prewarmGet(r *gin.Engine, token string, cfRay bool) string {
+	host := "example.com"
+	if cfRay {
+		host = prewarmHost
+	}
+	return prewarmGetHost(r, token, cfRay, host)
+}
+
+func prewarmGetHost(r *gin.Engine, token string, cfRay bool, host string) string {
 	req := httptest.NewRequest(http.MethodGet, "/s/"+token, nil)
 	req.Header.Set("User-Agent", prewarmDiscordUA)
+	req.Host = host
 	req.Header.Set("X-Forwarded-Proto", "https")
 	if cfRay {
 		req.Header.Set("Cf-Ray", "abc123-SIN")
@@ -81,7 +94,7 @@ func prewarmGet(r *gin.Engine, token string, cfRay bool) string {
 }
 
 func TestStreamSharedFileCacheControl(t *testing.T) {
-	r := newPrewarmRouter(t)
+	r, _ := newPrewarmRouter(t)
 	serveTelegramFile = func(_ *http.Request, w http.ResponseWriter, _ database.File, _ *config.Config) error {
 		w.WriteHeader(http.StatusOK)
 		return nil
@@ -107,11 +120,12 @@ func TestStreamSharedFileCacheControl(t *testing.T) {
 }
 
 func TestDiscordPrewarm(t *testing.T) {
-	r := newPrewarmRouter(t)
+	r, cfg := newPrewarmRouter(t)
 	var calls int32
 	setWarm := func(delay time.Duration, wait time.Duration) {
 		atomic.StoreInt32(&calls, 0)
-		warmedURLs.Range(func(k, _ any) bool { warmedURLs.Delete(k); return true })
+		warmedFiles.Range(func(k, _ any) bool { warmedFiles.Delete(k); return true })
+		warmFailures.Range(func(k, _ any) bool { warmFailures.Delete(k); return true })
 		discordWarmWait = wait
 		warmFetch = func(_ context.Context, url string) (int64, error) {
 			atomic.AddInt32(&calls, 1)
@@ -121,7 +135,7 @@ func TestDiscordPrewarm(t *testing.T) {
 	}
 	waitIdle := func() {
 		for i := 0; i < 300; i++ {
-			if _, busy := warmFlights.Load(prewarmVideoURL); !busy {
+			if _, busy := warmFlights.Load(1); !busy {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -148,7 +162,7 @@ func TestDiscordPrewarm(t *testing.T) {
 		if strings.Contains(body, "og:video") {
 			t.Errorf("unexpected og:video: %s", body)
 		}
-		for _, want := range []string{`og:image" content="https://example.com/s/vid/thumb"`, "summary_large_image", `og:image:width" content="1280"`} {
+		for _, want := range []string{`og:image" content="https://telecloud-cf.example.com/s/vid/thumb"`, "summary_large_image", `og:image:width" content="1280"`} {
 			if !strings.Contains(body, want) {
 				t.Errorf("card missing %q\n%s", want, body)
 			}
@@ -202,4 +216,75 @@ func TestDiscordPrewarm(t *testing.T) {
 			t.Errorf("warm calls = %d, want 1", n)
 		}
 	})
+
+	t.Run("warm URL is built from config", func(t *testing.T) {
+		setWarm(0, 2*time.Second)
+		var got string
+		warmFetch = func(_ context.Context, url string) (int64, error) {
+			got = url
+			return 60 << 20, nil
+		}
+		prewarmGet(r, "vid", true)
+		if got != prewarmVideoURL {
+			t.Errorf("warm URL = %q, want %q", got, prewarmVideoURL)
+		}
+	})
+
+	t.Run("host mismatch does not warm", func(t *testing.T) {
+		setWarm(0, 2*time.Second)
+		body := prewarmGetHost(r, "vid", true, "evil.example")
+		if n := atomic.LoadInt32(&calls); n != 0 {
+			t.Errorf("warm calls = %d, want 0", n)
+		}
+		if !strings.Contains(body, `og:video" content="https://evil.example/s/vid/stream/clip.mp4"`) {
+			t.Errorf("expected unchanged embed, got %s", body)
+		}
+	})
+
+	t.Run("empty base URL disables warm", func(t *testing.T) {
+		setWarm(0, 2*time.Second)
+		cfg.DiscordCFBaseURL = ""
+		defer func() { cfg.DiscordCFBaseURL = "https://" + prewarmHost }()
+		body := prewarmGet(r, "vid", true)
+		if n := atomic.LoadInt32(&calls); n != 0 {
+			t.Errorf("warm calls = %d, want 0", n)
+		}
+		if !strings.Contains(body, "og:video") {
+			t.Errorf("expected og:video, got %s", body)
+		}
+	})
+
+	t.Run("failed warm is cached", func(t *testing.T) {
+		setWarm(0, 2*time.Second)
+		warmFetch = func(_ context.Context, _ string) (int64, error) {
+			atomic.AddInt32(&calls, 1)
+			return 1, nil // wrong size
+		}
+		for i := 0; i < 2; i++ {
+			body := prewarmGet(r, "vid", true)
+			if strings.Contains(body, "og:video") || !strings.Contains(body, "summary_large_image") {
+				t.Errorf("expected card, got %s", body)
+			}
+			waitIdle()
+		}
+		if n := atomic.LoadInt32(&calls); n != 1 {
+			t.Errorf("warm calls = %d, want 1", n)
+		}
+	})
+}
+
+func TestStreamSharedFileErrorNotCacheable(t *testing.T) {
+	r, _ := newPrewarmRouter(t)
+	serveTelegramFile = func(*http.Request, http.ResponseWriter, database.File, *config.Config) error {
+		return errors.New("telegram down")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/s/vid/stream/clip.mp4", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
 }

@@ -19,6 +19,7 @@ type Config struct {
 	UploadThreads          int
 	DownloadPrefetch       int
 	DiscordEmbedMaxVideoMB int
+	DiscordCFBaseURL       string
 	DatabaseDriver         string
 	DatabasePath           string
 	DatabaseDSN            string
@@ -121,6 +122,7 @@ func Load() (*Config, error) {
 		UploadThreads:          uploadThreads,
 		DownloadPrefetch:       downloadPrefetch,
 		DiscordEmbedMaxVideoMB: discordEmbedMaxVideoMB,
+		DiscordCFBaseURL:       strings.TrimRight(strings.TrimSpace(getEnv("DISCORD_CF_BASE_URL", "")), "/"),
 		DatabaseDriver:         strings.ToLower(getEnv("DATABASE_DRIVER", "sqlite")),
 		DatabasePath:           getEnv("DATABASE_PATH", "database.db"),
 		DatabaseDSN:            getEnv("DATABASE_DSN", ""),

@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,12 +20,20 @@ import (
 const discordCFMaxCacheBytes int64 = 512 << 20
 
 var (
-	discordWarmTTL  = 20 * time.Hour
-	discordWarmWait = 6 * time.Second
-	warmFetch       = defaultWarmFetch
-	warmedURLs      sync.Map // video URL -> time.Time of last successful warm
-	warmFlights     sync.Map // video URL -> *warmFlight
-	warmSlots       = make(chan struct{}, 2)
+	discordWarmTTL        = 20 * time.Hour
+	discordWarmWait       = 6 * time.Second
+	discordWarmRetryAfter = 10 * time.Minute
+	warmFetch             = defaultWarmFetch
+	warmedFiles           sync.Map // file ID (int) -> time.Time of last successful warm
+	warmFailures          sync.Map // file ID (int) -> time.Time of last failed warm
+	warmFlights           sync.Map // file ID (int) -> *warmFlight
+	warmSlots             = make(chan struct{}, 2)
+
+	// Never follow redirects: the warm target is fixed by configuration.
+	warmClient = &http.Client{
+		Timeout:       5 * time.Minute,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 )
 
 type warmFlight struct {
@@ -38,7 +48,7 @@ func defaultWarmFetch(ctx context.Context, url string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := warmClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -49,6 +59,22 @@ func defaultWarmFetch(ctx context.Context, url string) (int64, error) {
 	return io.Copy(io.Discard, resp.Body)
 }
 
+// discordEmbedOrigin returns the origin for embed URLs and whether cache warming
+// applies. Warming runs only for requests that arrive through the configured
+// Cloudflare hostname, and then every URL is built from configuration, never
+// from request-controlled headers.
+func (h *Handler) discordEmbedOrigin(c *gin.Context) (string, bool) {
+	base := h.cfg.DiscordCFBaseURL
+	if base == "" || c.GetHeader("Cf-Ray") == "" {
+		return getRequestOrigin(c), false
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" || !strings.EqualFold(u.Host, c.Request.Host) {
+		return getRequestOrigin(c), false
+	}
+	return base, true
+}
+
 // discordThumbCard drops the video part of an embed, leaving a large thumbnail card.
 func discordThumbCard(e discordEmbed) discordEmbed {
 	e.ImageWidth, e.ImageHeight = e.VideoWidth, e.VideoHeight
@@ -57,31 +83,33 @@ func discordThumbCard(e discordEmbed) discordEmbed {
 	return e
 }
 
-// prepareDiscordVideoEmbed makes sure a video embed requested through Cloudflare
-// is already in Cloudflare's cache before Discord fetches it; otherwise it falls
-// back to a thumbnail card so Discord never shows a blank embed.
-func prepareDiscordVideoEmbed(c *gin.Context, item database.File, embed discordEmbed) discordEmbed {
-	if c.GetHeader("Cf-Ray") == "" || embed.VideoURL == "" {
+// prepareDiscordVideoEmbed makes sure a video embed is already in Cloudflare's
+// cache before Discord fetches it; otherwise it falls back to a thumbnail card
+// so Discord never shows a blank embed.
+func prepareDiscordVideoEmbed(item database.File, embed discordEmbed) discordEmbed {
+	if embed.VideoURL == "" {
 		return embed
 	}
 	if item.Size > discordCFMaxCacheBytes {
 		return discordThumbCard(embed)
 	}
-	url := embed.VideoURL
-	if t, ok := warmedURLs.Load(url); ok && time.Since(t.(time.Time)) < discordWarmTTL {
+	if t, ok := warmedFiles.Load(item.ID); ok && time.Since(t.(time.Time)) < discordWarmTTL {
 		return embed
+	}
+	if t, ok := warmFailures.Load(item.ID); ok && time.Since(t.(time.Time)) < discordWarmRetryAfter {
+		return discordThumbCard(embed)
 	}
 
 	f := &warmFlight{done: make(chan struct{})}
-	if existing, loaded := warmFlights.LoadOrStore(url, f); loaded {
+	if existing, loaded := warmFlights.LoadOrStore(item.ID, f); loaded {
 		f = existing.(*warmFlight)
 	} else {
 		select {
 		case warmSlots <- struct{}{}:
-			go runWarm(f, url, item.Size)
+			go runWarm(f, item.ID, embed.VideoURL, item.Size)
 		default:
 			close(f.done)
-			warmFlights.Delete(url)
+			warmFlights.Delete(item.ID)
 			return discordThumbCard(embed)
 		}
 	}
@@ -98,24 +126,26 @@ func prepareDiscordVideoEmbed(c *gin.Context, item database.File, embed discordE
 	return discordThumbCard(embed)
 }
 
-func runWarm(f *warmFlight, url string, size int64) {
+func runWarm(f *warmFlight, id int, url string, size int64) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[Discord] cache warm panic for %s: %v", url, r)
+			log.Printf("[Discord] cache warm panic for file %d: %v", id, r)
 			f.ok = false
 		}
 		if f.ok {
-			warmedURLs.Store(url, time.Now())
+			warmedFiles.Store(id, time.Now())
+		} else {
+			warmFailures.Store(id, time.Now())
 		}
 		close(f.done)
-		warmFlights.Delete(url)
+		warmFlights.Delete(id)
 		<-warmSlots
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	n, err := warmFetch(ctx, url)
 	if err != nil {
-		log.Printf("[Discord] cache warm failed for %s: %v", url, err)
+		log.Printf("[Discord] cache warm failed for file %d: %v", id, err)
 		return
 	}
 	f.ok = n == size
