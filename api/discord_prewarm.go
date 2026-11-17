@@ -91,7 +91,8 @@ func prepareDiscordVideoEmbed(item database.File, embed discordEmbed) discordEmb
 		return embed
 	}
 	if item.Size > discordCFMaxCacheBytes {
-		return discordThumbCard(embed)
+		// Cloudflare will not cache it; serve the plain video embed without warming.
+		return embed
 	}
 	if t, ok := warmedFiles.Load(item.ID); ok && time.Since(t.(time.Time)) < discordWarmTTL {
 		return embed

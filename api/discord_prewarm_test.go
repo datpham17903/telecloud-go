@@ -174,11 +174,11 @@ func TestDiscordPrewarm(t *testing.T) {
 		}
 	})
 
-	t.Run("too large for cloudflare", func(t *testing.T) {
+	t.Run("too large for cloudflare is served without warming", func(t *testing.T) {
 		setWarm(0, 2*time.Second)
 		body := prewarmGet(r, "huge", true)
-		if strings.Contains(body, "og:video") || !strings.Contains(body, "summary_large_image") {
-			t.Errorf("expected card, got %s", body)
+		if !strings.Contains(body, "og:video") {
+			t.Errorf("expected og:video, got %s", body)
 		}
 		if n := atomic.LoadInt32(&calls); n != 0 {
 			t.Errorf("warm calls = %d, want 0", n)
