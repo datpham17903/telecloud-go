@@ -62,16 +62,17 @@ func Load() (*Config, error) {
 	}
 
 	// Number of 1MB chunks fetched ahead of the read cursor while streaming.
-	discordEmbedMaxVideoMB, _ := strconv.Atoi(getEnv("DISCORD_EMBED_MAX_VIDEO_MB", "80"))
-	if discordEmbedMaxVideoMB <= 0 {
-		discordEmbedMaxVideoMB = 80
-	}
 	downloadPrefetch, _ := strconv.Atoi(getEnv("TG_DOWNLOAD_PREFETCH", "4"))
 	if downloadPrefetch <= 0 {
 		downloadPrefetch = 4
 	}
 	if downloadPrefetch > 16 {
 		downloadPrefetch = 16
+	}
+
+	discordEmbedMaxVideoMB, _ := strconv.Atoi(getEnv("DISCORD_EMBED_MAX_VIDEO_MB", "80"))
+	if discordEmbedMaxVideoMB <= 0 {
+		discordEmbedMaxVideoMB = 80
 	}
 
 	logGroupID := os.Getenv("LOG_GROUP_ID")
