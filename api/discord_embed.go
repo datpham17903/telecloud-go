@@ -75,9 +75,14 @@ func embedDimensions(thumbPath *string) (int, int) {
 	return 1280, (cfg.Height*1280 + cfg.Width/2) / cfg.Width
 }
 
+// discordMediaURL is the absolute stream URL of a shared file.
+func discordMediaURL(origin, token, filename string) string {
+	return origin + "/s/" + token + "/stream/" + url.PathEscape(filename)
+}
+
 func buildDiscordEmbed(item database.File, token, origin string, maxVideoBytes int64) (discordEmbed, bool) {
 	mime := resolveEmbedMime(item)
-	mediaURL := origin + "/s/" + token + "/stream/" + url.PathEscape(item.Filename)
+	mediaURL := discordMediaURL(origin, token, item.Filename)
 	embed := discordEmbed{
 		Title:       item.Filename,
 		Description: "Size: " + formatBytes(item.Size) + " - Created: " + item.CreatedAt.Format("2006-01-02 15:04:05"),

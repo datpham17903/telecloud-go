@@ -1628,6 +1628,11 @@ func (h *Handler) publicShareItem(origin string, fileID int64, shareMode, dbPath
 		return
 	}
 
+	var shared database.File
+	if err := database.RODB.Get(&shared, "SELECT id, filename, size, mime_type, is_folder FROM files WHERE id = ?", targetID); err == nil {
+		h.warmShareInBackground(shared, shareToken)
+	}
+
 	resp["share_token"] = shareToken
 	resp["share_link"] = origin + "/s/" + shareToken
 	if actualShareMode != "folder" {

@@ -452,7 +452,7 @@ func (h *Handler) handleShareFile(c *gin.Context) {
 	password := c.PostForm("password")
 	var item database.File
 	username := c.GetString("username")
-	if err := database.RODB.Get(&item, "SELECT path, is_folder FROM files WHERE id = ? AND owner = ?", id, username); err != nil {
+	if err := database.RODB.Get(&item, "SELECT id, filename, size, mime_type, path, is_folder FROM files WHERE id = ? AND owner = ?", id, username); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
@@ -467,7 +467,10 @@ func (h *Handler) handleShareFile(c *gin.Context) {
 	}
 
 	token := uuid.New().String()
-	database.DB.Exec("UPDATE files SET share_token = ?, share_password = ?, share_views = 0, share_downloads = 0 WHERE id = ?", token, hashedPass, id)
+	if _, err := database.DB.Exec("UPDATE files SET share_token = ?, share_password = ?, share_views = 0, share_downloads = 0 WHERE id = ?", token, hashedPass, id); err == nil {
+		item.SharePassword = hashedPass
+		h.warmShareInBackground(item, token)
+	}
 
 	resp := gin.H{"share_token": token}
 	if !item.IsFolder {
@@ -492,6 +495,7 @@ func (h *Handler) handleRevokeShare(c *gin.Context) {
 		database.DB.Exec("DELETE FROM share_sessions WHERE share_token = ?", *item.ShareToken)
 	}
 	database.DB.Exec("UPDATE files SET share_token = NULL, share_password = NULL, share_views = 0, share_downloads = 0 WHERE id = ?", id)
+	clearWarmState(id)
 	c.JSON(http.StatusOK, gin.H{"status": "revoked"})
 }
 

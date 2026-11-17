@@ -27,6 +27,7 @@ var (
 	warmedFiles           sync.Map // file ID (int) -> time.Time of last successful warm
 	warmFailures          sync.Map // file ID (int) -> time.Time of last failed warm
 	warmFlights           sync.Map // file ID (int) -> *warmFlight
+	warmCurrentURL        sync.Map // file ID (int) -> URL of the live share; stale warms record nothing
 	warmSlots             = make(chan struct{}, 2)
 
 	// Never follow redirects: the warm target is fixed by configuration.
@@ -37,6 +38,7 @@ var (
 )
 
 type warmFlight struct {
+	url  string
 	done chan struct{}
 	ok   bool
 }
@@ -101,18 +103,10 @@ func prepareDiscordVideoEmbed(item database.File, embed discordEmbed) discordEmb
 		return discordThumbCard(embed)
 	}
 
-	f := &warmFlight{done: make(chan struct{})}
-	if existing, loaded := warmFlights.LoadOrStore(item.ID, f); loaded {
-		f = existing.(*warmFlight)
-	} else {
-		select {
-		case warmSlots <- struct{}{}:
-			go runWarm(f, item.ID, embed.VideoURL, item.Size)
-		default:
-			close(f.done)
-			warmFlights.Delete(item.ID)
-			return discordThumbCard(embed)
-		}
+	warmCurrentURL.Store(item.ID, embed.VideoURL)
+	f := startWarm(item.ID, embed.VideoURL, item.Size)
+	if f == nil {
+		return discordThumbCard(embed)
 	}
 
 	timer := time.NewTimer(discordWarmWait)
@@ -127,24 +121,85 @@ func prepareDiscordVideoEmbed(item database.File, embed discordEmbed) discordEmb
 	return discordThumbCard(embed)
 }
 
-func runWarm(f *warmFlight, id int, url string, size int64) {
+// startWarm starts, or joins, the single warm flight for a file. A flight for a
+// different (stale) URL is replaced. It returns nil when no slot is free.
+func startWarm(id int, url string, size int64) *warmFlight {
+	f := &warmFlight{url: url, done: make(chan struct{})}
+	for {
+		existing, loaded := warmFlights.LoadOrStore(id, f)
+		if !loaded {
+			break
+		}
+		old := existing.(*warmFlight)
+		if old.url == url {
+			return old
+		}
+		if warmFlights.CompareAndSwap(id, old, f) {
+			break
+		}
+	}
+	select {
+	case warmSlots <- struct{}{}:
+		go runWarm(f, id, size)
+		return f
+	default:
+		close(f.done)
+		warmFlights.CompareAndDelete(id, f)
+		return nil
+	}
+}
+
+// clearWarmState forgets everything known about a file's warm state, used when
+// its share is created or revoked (a new share has a new token, hence a new URL).
+func clearWarmState(id int) {
+	warmedFiles.Delete(id)
+	warmFailures.Delete(id)
+	warmCurrentURL.Delete(id)
+}
+
+// warmShareInBackground starts warming Cloudflare's cache for a freshly created
+// share link without waiting for it. Skipped when it cannot help.
+func (h *Handler) warmShareInBackground(item database.File, token string) {
+	clearWarmState(item.ID)
+	if h.cfg.DiscordCFBaseURL == "" || item.IsFolder {
+		return
+	}
+	if item.SharePassword != nil && *item.SharePassword != "" {
+		return
+	}
+	switch resolveEmbedMime(item) {
+	case "video/mp4", "video/webm", "video/quicktime":
+	default:
+		return
+	}
+	if item.Size <= 0 || item.Size > discordCFMaxCacheBytes {
+		return
+	}
+	u := discordMediaURL(h.cfg.DiscordCFBaseURL, token, item.Filename)
+	warmCurrentURL.Store(item.ID, u)
+	startWarm(item.ID, u, item.Size)
+}
+
+func runWarm(f *warmFlight, id int, size int64) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[Discord] cache warm panic for file %d: %v", id, r)
 			f.ok = false
 		}
-		if f.ok {
-			warmedFiles.Store(id, time.Now())
-		} else {
-			warmFailures.Store(id, time.Now())
+		if cur, _ := warmCurrentURL.Load(id); cur == f.url {
+			if f.ok {
+				warmedFiles.Store(id, time.Now())
+			} else {
+				warmFailures.Store(id, time.Now())
+			}
 		}
 		close(f.done)
-		warmFlights.Delete(id)
+		warmFlights.CompareAndDelete(id, f)
 		<-warmSlots
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	n, err := warmFetch(ctx, url)
+	n, err := warmFetch(ctx, f.url)
 	if err != nil {
 		log.Printf("[Discord] cache warm failed for file %d: %v", id, err)
 		return
