@@ -76,7 +76,6 @@ func (c *BlockCache) removeOldest() {
 var (
 	locationCache    = make(map[int]*cachedLocation)
 	sessionLocCache  = make(map[sessionLocKey]*cachedLocation) // per-(message, session) locations
-	sessionLocFailed = make(map[sessionLocKey]time.Time)       // sessions that could not resolve a message -> retry-after
 	cacheMutex       sync.RWMutex
 	globalChunkCache = NewBlockCache(128) // 128 MB maximum buffer size
 
@@ -104,11 +103,6 @@ func init() {
 			for k, v := range sessionLocCache {
 				if now.After(v.expiresAt) {
 					delete(sessionLocCache, k)
-				}
-			}
-			for k, until := range sessionLocFailed {
-				if now.After(until) {
-					delete(sessionLocFailed, k)
 				}
 			}
 			cacheMutex.Unlock()
@@ -152,7 +146,6 @@ type tgFileReader struct {
 	prefetchSem      chan struct{} // caps concurrent prefetch goroutines for this reader
 	locMu            sync.Mutex    // Protects locs and locFlights
 	locFlights       map[*tg.Client]*locFlight
-	badSessions      map[*tg.Client]bool // sessions that cannot resolve this file; never retried by this reader
 
 	// fetch performs the actual chunk download. Indirected so tests can run the
 	// caching/prefetch logic without touching the network.
@@ -346,19 +339,6 @@ type locFlight struct {
 
 // locFor returns the file location valid for the given session, resolving it
 // once (single-flight per session) if this reader has not used it yet.
-// sessionLocFailureTTL is how long other readers skip a session that could not
-// resolve a message.
-const sessionLocFailureTTL = 10 * time.Minute
-
-func (r *tgFileReader) markBadSession(api *tg.Client) {
-	r.locMu.Lock()
-	if r.badSessions == nil {
-		r.badSessions = make(map[*tg.Client]bool)
-	}
-	r.badSessions[api] = true
-	r.locMu.Unlock()
-}
-
 func (r *tgFileReader) locFor(api *tg.Client) (tg.InputFileLocationClass, error) {
 	r.locMu.Lock()
 	if loc, ok := r.locs[api]; ok {
@@ -374,23 +354,6 @@ func (r *tgFileReader) locFor(api *tg.Client) (tg.InputFileLocationClass, error)
 			return nil, r.ctx.Err()
 		}
 	}
-	if r.badSessions[api] {
-		r.locMu.Unlock()
-		return nil, fmt.Errorf("session cannot resolve msgID %d", r.msgID)
-	}
-	key := sessionLocKey{r.msgID, api}
-	cacheMutex.RLock()
-	failedUntil, failed := sessionLocFailed[key]
-	cached, cachedOK := sessionLocCache[key]
-	cacheMutex.RUnlock()
-	if failed && time.Now().Before(failedUntil) {
-		if r.badSessions == nil {
-			r.badSessions = make(map[*tg.Client]bool)
-		}
-		r.badSessions[api] = true
-		r.locMu.Unlock()
-		return nil, fmt.Errorf("session cannot resolve msgID %d", r.msgID)
-	}
 	f := &locFlight{done: make(chan struct{})}
 	if r.locFlights == nil {
 		r.locFlights = make(map[*tg.Client]*locFlight)
@@ -398,29 +361,19 @@ func (r *tgFileReader) locFor(api *tg.Client) (tg.InputFileLocationClass, error)
 	r.locFlights[api] = f
 	r.locMu.Unlock()
 
-	if cachedOK && time.Now().Before(cached.expiresAt) {
-		// Keep the cached entry's original expiry; only remember it locally.
+	cacheMutex.RLock()
+	cached, ok := sessionLocCache[sessionLocKey{r.msgID, api}]
+	cacheMutex.RUnlock()
+	if ok && time.Now().Before(cached.expiresAt) {
 		f.loc = cached.loc
-		r.locMu.Lock()
-		if r.locs == nil {
-			r.locs = make(map[*tg.Client]tg.InputFileLocationClass)
-		}
-		r.locs[api] = f.loc
-		r.locMu.Unlock()
 	} else {
 		f.loc, f.err = resolveLocation(r.ctx, api, r.msgID, r.cfg)
 		if f.err == nil && f.loc == nil {
 			f.err = fmt.Errorf("no location for msgID %d", r.msgID)
 		}
-		if f.err == nil {
-			r.setLoc(api, f.loc)
-		} else if r.ctx.Err() == nil {
-			// A real failure (not a cancelled stream): stop asking this session.
-			r.markBadSession(api)
-			cacheMutex.Lock()
-			sessionLocFailed[key] = time.Now().Add(sessionLocFailureTTL)
-			cacheMutex.Unlock()
-		}
+	}
+	if f.err == nil {
+		r.setLoc(api, f.loc)
 	}
 	r.locMu.Lock()
 	delete(r.locFlights, api)
