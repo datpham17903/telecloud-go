@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/render"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -87,7 +88,7 @@ func (h *Handler) handleVerifySharePassword(c *gin.Context) {
 func (h *Handler) handleGetSharedFile(c *gin.Context) {
 	token := c.Param("token")
 	var item database.File
-	if err := database.RODB.Get(&item, "SELECT id, filename, size, created_at, thumb_path, is_folder, path, share_password, share_views, share_downloads FROM files WHERE share_token = ? AND deleted_at IS NULL AND (is_folder = TRUE OR message_id IS NOT NULL)", token); err != nil {
+	if err := database.RODB.Get(&item, "SELECT id, filename, size, mime_type, created_at, thumb_path, is_folder, path, share_password, share_views, share_downloads FROM files WHERE share_token = ? AND deleted_at IS NULL AND (is_folder = TRUE OR message_id IS NOT NULL)", token); err != nil {
 		c.HTML(http.StatusNotFound, "error.html", gin.H{
 			"error_message": "File not found or link has been revoked.",
 			"version":       h.cfg.Version,
@@ -118,6 +119,13 @@ func (h *Handler) handleGetSharedFile(c *gin.Context) {
 			"share_downloads": item.ShareDownloads,
 		})
 		return
+	}
+
+	if isDiscordBot(c.GetHeader("User-Agent")) {
+		if embed, ok := buildDiscordEmbed(item, token, getRequestOrigin(c), int64(h.cfg.DiscordEmbedMaxVideoMB)<<20); ok {
+			c.Render(http.StatusOK, render.HTML{Template: discordEmbedTemplate, Data: embed})
+			return
+		}
 	}
 
 	hasThumb := false

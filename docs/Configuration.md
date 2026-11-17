@@ -17,6 +17,7 @@ Sao chép tệp `env.example` thành `.env` trong thư mục chứa file thực 
 *   `PORT`: Cổng muốn chạy ứng dụng (mặc định: 8091).
 *   `TG_UPLOAD_THREADS`: (Tùy chọn) Số luồng upload đồng thời cho mỗi file part. Mặc định là `2`. Có thể tăng lên `4` nếu mạng mạnh.
 *   `TG_DOWNLOAD_PREFETCH`: (Tùy chọn) Số chunk 1MB được tải trước song song khi stream/tải xuống. Mặc định là `4`, tối đa `16`. Giảm xuống `2` nếu Bot Pool ít mà nhiều người xem cùng lúc gây lỗi `FLOOD_WAIT`; tăng chỉ có tác dụng khi Bot Pool đủ lớn.
+*   `DISCORD_EMBED_MAX_VIDEO_MB`: (Tùy chọn) Dung lượng video tối đa (MB) được nhúng trình phát khi dán link share vào Discord. Mặc định `80`. Video lớn hơn chỉ hiện thumbnail. Server phải truy cập được công khai qua HTTPS.
 *   `BOT_TOKENS`: **Không còn hỗ trợ cấu hình qua tệp .env**. Thay vào đó, bạn có thể dễ dàng quản lý và thêm các Bot phụ (Bot Pool) một cách trực quan trong phần *Cấu hình Bot Pool* ở trang Cài đặt của Admin trên giao diện Web, giúp phân phối tải trọng và tăng tốc độ tối đa.
 *   `DATABASE_DRIVER`: (Tùy chọn) Loại cơ sở dữ liệu (`sqlite`, `mysql` hoặc `postgres`). Mặc định là `sqlite`.
 *   `DATABASE_PATH`: (Tùy chọn) Đường dẫn tới file database nếu dùng SQLite (mặc định: `database.db`).
@@ -145,6 +146,7 @@ Copy `env.example` to `.env` in the binary directory and fill in your details:
 *   `PORT`: Application port (default: 8091).
 *   `TG_UPLOAD_THREADS`: (Optional) Concurrent upload threads per part. Default: `2`.
 *   `TG_DOWNLOAD_PREFETCH`: (Optional) Number of 1MB chunks prefetched in parallel while streaming or downloading. Default: `4`, capped at `16`. Lower it to `2` if a small Bot Pool serving many concurrent viewers triggers `FLOOD_WAIT`; raising it only helps when the Bot Pool is large enough.
+*   `DISCORD_EMBED_MAX_VIDEO_MB`: (Optional) Max video size in MB that gets an inline player when a share link is posted on Discord. Default: `80`. Larger videos show a thumbnail card. Requires the instance to be publicly reachable over HTTPS.
 *   `BOT_TOKENS`: **No longer supported via the .env file**. Instead, you can easily configure and manage secondary bots (Bot Pool) dynamically and securely via the *Bot Pool Settings* section in the Admin Settings dashboard within the Web UI to maximize speeds.
 *   `DATABASE_DRIVER`: `sqlite`, `mysql`, or `postgres`. Default: `sqlite`.
 *   `DATABASE_DSN`: Required for MySQL/Postgres.

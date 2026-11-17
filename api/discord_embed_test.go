@@ -1,15 +1,21 @@
 package api
 
 import (
+	"html/template"
 	"image"
 	"image/jpeg"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"telecloud/config"
 	"telecloud/database"
+
+	"github.com/gin-gonic/gin"
 )
 
 func embedTestThumb(t *testing.T, w, h int) *string {
@@ -151,5 +157,81 @@ func TestDiscordEmbedTemplate(t *testing.T) {
 	}
 	if strings.Contains(img, "og:video") {
 		t.Error("image output must not contain og:video")
+	}
+}
+
+func TestHandleGetSharedFileDiscordEmbed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dbPath := filepath.Join(t.TempDir(), "embed.db")
+	t.Cleanup(func() {
+		database.RWDB.Close()
+		database.RODB.Close()
+	})
+	if err := database.InitDB("sqlite", dbPath, ""); err != nil {
+		t.Fatalf("failed to initialize db: %v", err)
+	}
+
+	tmpl := template.Must(template.New("share.html").Parse("SHARE_PAGE"))
+	template.Must(tmpl.New("share_login.html").Parse("LOGIN_PAGE"))
+	r := gin.New()
+	r.SetHTMLTemplate(tmpl)
+	h := &Handler{cfg: &config.Config{DiscordEmbedMaxVideoMB: 80}}
+	r.GET("/s/:token", h.handleGetSharedFile)
+
+	rows := []struct {
+		token, filename, mime string
+		size                  int64
+		password              *string
+	}{
+		{"vid", "clip.mp4", "video/mp4", 40 << 20, nil},
+		{"big", "big.mp4", "video/mp4", 81 << 20, nil},
+		{"mkv", "a.mkv", "video/x-matroska", 10 << 20, nil},
+		{"pw", "clip.mp4", "video/mp4", 10 << 20, func() *string { s := "x"; return &s }()},
+		{"esc", `a"b<c>.mp4`, "video/mp4", 10 << 20, nil},
+	}
+	for _, row := range rows {
+		_, err := database.DB.Exec("INSERT INTO files (message_id, filename, path, size, mime_type, share_token, thumb_path, share_password) VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+			row.filename, "/"+row.token, row.size, row.mime, row.token, *embedTestThumb(t, 320, 180), row.password)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const discord = "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
+	const chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0"
+	tests := []struct {
+		name, token, ua string
+		exact           string
+		contains        string
+		notContains     string
+	}{
+		{"discord video", "vid", discord, "", `<meta property="og:video" content="https://example.com/s/vid/stream/clip.mp4">`, "SHARE_PAGE"},
+		{"browser unchanged", "vid", chrome, "SHARE_PAGE", "", ""},
+		{"video over limit", "big", discord, "", "SHARE_PAGE", "og:video"},
+		{"mkv", "mkv", discord, "", "SHARE_PAGE", ""},
+		{"password protected", "pw", discord, "", "LOGIN_PAGE", "/stream"},
+		{"escaped title", "esc", discord, "", `a&#34;b&lt;c&gt;.mp4`, `a"b<c>`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/s/"+tc.token, nil)
+			req.Header.Set("User-Agent", tc.ua)
+			req.Header.Set("X-Forwarded-Proto", "https")
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			body := w.Body.String()
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			if tc.exact != "" && body != tc.exact {
+				t.Errorf("body = %q, want %q", body, tc.exact)
+			}
+			if tc.contains != "" && !strings.Contains(body, tc.contains) {
+				t.Errorf("body missing %q\n%s", tc.contains, body)
+			}
+			if tc.notContains != "" && strings.Contains(body, tc.notContains) {
+				t.Errorf("body must not contain %q\n%s", tc.notContains, body)
+			}
+		})
 	}
 }
