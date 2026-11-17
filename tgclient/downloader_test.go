@@ -3,12 +3,15 @@ package tgclient
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"telecloud/config"
 
 	"github.com/gotd/td/tg"
 )
@@ -317,5 +320,78 @@ func TestReaderFetchesUseOwnSession(t *testing.T) {
 		if api != testSessionAPI {
 			t.Fatalf("fetch %d used a different session than the reader's", i)
 		}
+	}
+}
+
+// stubSessions wires fetchChunk seams: testSessionAPI is the reader's session,
+// altAPI another one whose file location differs.
+func stubSessions(t *testing.T, r *tgFileReader, altAPI *tg.Client, altLoc tg.InputFileLocationClass, getFile func(api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error)) {
+	t.Helper()
+	prevResolve, prevGet, prevAlt, prevMark := resolveLocation, uploadGetFile, pickAltAPI, markBotCooldown
+	t.Cleanup(func() {
+		resolveLocation, uploadGetFile, pickAltAPI, markBotCooldown = prevResolve, prevGet, prevAlt, prevMark
+	})
+	resolveLocation = func(_ context.Context, api *tg.Client, _ int, _ *config.Config) (tg.InputFileLocationClass, error) {
+		if api == altAPI {
+			return altLoc, nil
+		}
+		return nil, errors.New("unexpected resolve")
+	}
+	uploadGetFile = func(_ context.Context, api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
+		return getFile(api, req)
+	}
+	pickAltAPI = func() *tg.Client { return altAPI }
+	markBotCooldown = func(*tg.Client, int) {}
+}
+
+func TestFetchChunkFloodWaitSwitchUsesOwnLocation(t *testing.T) {
+	r, _ := newTestReader(t, makeContent(testChunkSize), 1, 0)
+	origLoc := &tg.InputDocumentFileLocation{ID: 1}
+	altLoc := &tg.InputDocumentFileLocation{ID: 2}
+	r.loc = origLoc
+	altAPI := &tg.Client{}
+	stubSessions(t, r, altAPI, altLoc, func(api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
+		if api == testSessionAPI {
+			return nil, errors.New("FLOOD_WAIT_1")
+		}
+		if req.Location != altLoc {
+			return nil, errors.New("FILE_REFERENCE_EXPIRED")
+		}
+		return &tg.UploadFile{Bytes: make([]byte, req.Limit)}, nil
+	})
+
+	data, err := r.fetchChunk(testSessionAPI, 0, testChunkSize)
+	if err != nil || int64(len(data)) != testChunkSize {
+		t.Fatalf("fetchChunk = %d bytes, err %v", len(data), err)
+	}
+	if r.loc != origLoc {
+		t.Fatal("r.loc was changed by a retry on another session")
+	}
+}
+
+func TestFetchChunkFileRefOnSwitchedSessionKeepsSharedLocation(t *testing.T) {
+	r, _ := newTestReader(t, makeContent(testChunkSize), 1, 0)
+	origLoc := &tg.InputDocumentFileLocation{ID: 1}
+	altLoc := &tg.InputDocumentFileLocation{ID: 2}
+	r.loc = origLoc
+	altAPI := &tg.Client{}
+	stubSessions(t, r, altAPI, altLoc, func(api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
+		if req.Location != altLoc {
+			return nil, errors.New("FILE_REFERENCE_EXPIRED")
+		}
+		return &tg.UploadFile{Bytes: make([]byte, req.Limit)}, nil
+	})
+
+	if _, err := r.fetchChunk(altAPI, 0, testChunkSize); err != nil {
+		t.Fatal(err)
+	}
+	if r.loc != origLoc {
+		t.Fatal("r.loc was overwritten by a location bound to another session")
+	}
+	cacheMutex.Lock()
+	_, cached := locationCache[r.msgID]
+	cacheMutex.Unlock()
+	if cached {
+		t.Fatal("locationCache was written with another session's location")
 	}
 }

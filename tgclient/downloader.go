@@ -308,6 +308,16 @@ func (r *tgFileReader) triggerPrefetch(offset int64, limit int64) {
 	}()
 }
 
+// Seams so tests can exercise fetchChunk without Telegram sessions.
+var (
+	resolveLocation = resolveMediaLocation
+	uploadGetFile   = func(ctx context.Context, api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
+		return api.UploadGetFile(ctx, req)
+	}
+	pickAltAPI      = GetAPI
+	markBotCooldown = MarkBotCooldown
+)
+
 func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]byte, error) {
 	r.locMu.Lock()
 	loc := r.loc
@@ -324,7 +334,7 @@ func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]
 	var err error
 	refreshed := false
 	for attempt := 0; attempt < 3; attempt++ {
-		res, err = api.UploadGetFile(r.ctx, req)
+		res, err = uploadGetFile(r.ctx, api, req)
 		if err == nil {
 			// Check for incomplete reads (less bytes than requested limit and not EOF)
 			if fileObj, ok := res.(*tg.UploadFile); ok {
@@ -352,11 +362,15 @@ func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]
 				continue
 			}
 
+			// A location is only valid with the session that resolved it; only
+			// r.api's location is shared between goroutines.
+			shared := api == r.api
+
 			r.locMu.Lock()
 			// If another thread (e.g. prefetch or main read) has already refreshed the location,
 			// req.Location would be different from the updated r.loc.
 			// In that case, we can just use the new r.loc and retry immediately.
-			if r.loc != req.Location {
+			if shared && r.loc != req.Location {
 				req.Location = r.loc
 				r.locMu.Unlock()
 				refreshed = true
@@ -374,23 +388,25 @@ func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]
 			cacheMutex.Unlock()
 
 			// Re-resolve
-			newLoc, errResolve := resolveMediaLocation(r.ctx, api, r.msgID, r.cfg)
+			newLoc, errResolve := resolveLocation(r.ctx, api, r.msgID, r.cfg)
 			if errResolve != nil && api != Client.API() {
 				newLoc, errResolve = resolveMediaLocation(r.ctx, Client.API(), r.msgID, r.cfg)
 			}
 
 			if errResolve == nil && newLoc != nil {
-				r.locMu.Lock()
-				r.loc = newLoc
-				r.locMu.Unlock()
+				if shared {
+					r.locMu.Lock()
+					r.loc = newLoc
+					r.locMu.Unlock()
 
-				cacheMutex.Lock()
-				locationCache[r.msgID] = &cachedLocation{
-					loc:       newLoc,
-					api:       api,
-					expiresAt: time.Now().Add(1 * time.Hour),
+					cacheMutex.Lock()
+					locationCache[r.msgID] = &cachedLocation{
+						loc:       newLoc,
+						api:       api,
+						expiresAt: time.Now().Add(1 * time.Hour),
+					}
+					cacheMutex.Unlock()
 				}
-				cacheMutex.Unlock()
 
 				req.Location = newLoc
 				refreshed = true
@@ -407,14 +423,29 @@ func (r *tgFileReader) fetchChunk(api *tg.Client, offset int64, limit int64) ([]
 			if secs, ok := ParseFloodWait(err); ok {
 				// Take this session out of the rotation so other downloads stop
 				// picking it while it is rate-limited.
-				MarkBotCooldown(api, secs)
+				markBotCooldown(api, secs)
 				waitDuration = time.Duration(secs) * time.Second
 
 				// Waiting out a long flood would stall the stream. Retry immediately on
 				// another session instead; GetAPI skips the ones in cooldown.
-				if next := GetAPI(); next != api {
-					api = next
-					waitDuration = 0
+				// A location only works with the session that resolved it, so resolve
+				// one for the new session (local to this call); on failure wait it out.
+				if next := pickAltAPI(); next != api {
+					nextLoc := req.Location
+					if next == r.api {
+						r.locMu.Lock()
+						nextLoc = r.loc
+						r.locMu.Unlock()
+					} else if l, errNext := resolveLocation(r.ctx, next, r.msgID, r.cfg); errNext == nil && l != nil {
+						nextLoc = l
+					} else {
+						next = nil
+					}
+					if next != nil {
+						api = next
+						req.Location = nextLoc
+						waitDuration = 0
+					}
 				}
 			}
 			select {
