@@ -29,10 +29,6 @@ func newTestReader(t *testing.T, content []byte, depth int, fetchDelay time.Dura
 	globalChunkCache = NewBlockCache(128)
 	globalPrefetchSem = make(chan struct{}, 32)
 
-	prevPick := pickDownloadAPI
-	pickDownloadAPI = func() *tg.Client { return testSessionAPI }
-	t.Cleanup(func() { pickDownloadAPI = prevPick })
-
 	msgID := int(nextTestMsgID.Add(1))
 	rec := &fetchRecorder{perOffset: map[int64]int{}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -304,6 +300,29 @@ func min64(a, b int64) int64 {
 	return b
 }
 
+// Telegram file references are bound to the session that resolved them, so every
+// fetch (synchronous and prefetch) must use the reader's own session.
+func TestReaderFetchesUseOwnSession(t *testing.T) {
+	content := makeContent(6 * testChunkSize)
+	r, rec := newTestReader(t, content, 4, 0)
+
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatal(err)
+	}
+	r.waitForPrefetches()
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.apis) == 0 {
+		t.Fatal("no fetches recorded")
+	}
+	for i, api := range rec.apis {
+		if api != testSessionAPI {
+			t.Fatalf("fetch %d used a different session than the reader's", i)
+		}
+	}
+}
+
 // stubSessions wires fetchChunk seams: testSessionAPI is the reader's session,
 // altAPI another one whose file location differs.
 func stubSessions(t *testing.T, r *tgFileReader, altAPI *tg.Client, altLoc tg.InputFileLocationClass, getFile func(api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error)) {
@@ -329,7 +348,7 @@ func TestFetchChunkFloodWaitSwitchUsesOwnLocation(t *testing.T) {
 	r, _ := newTestReader(t, makeContent(testChunkSize), 1, 0)
 	origLoc := &tg.InputDocumentFileLocation{ID: 1}
 	altLoc := &tg.InputDocumentFileLocation{ID: 2}
-	r.locs = map[*tg.Client]tg.InputFileLocationClass{testSessionAPI: origLoc}
+	r.loc = origLoc
 	altAPI := &tg.Client{}
 	stubSessions(t, r, altAPI, altLoc, func(api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
 		if api == testSessionAPI {
@@ -345,142 +364,34 @@ func TestFetchChunkFloodWaitSwitchUsesOwnLocation(t *testing.T) {
 	if err != nil || int64(len(data)) != testChunkSize {
 		t.Fatalf("fetchChunk = %d bytes, err %v", len(data), err)
 	}
-	if r.locs[testSessionAPI] != origLoc {
+	if r.loc != origLoc {
 		t.Fatal("r.loc was changed by a retry on another session")
 	}
 }
 
-// multiSessionFixture wires a reader whose sessions each have their own file
-// location, using the real fetchChunk against a stubbed Telegram.
-type multiSessionFixture struct {
-	r        *tgFileReader
-	sessions []*tg.Client // sessions[0] is the reader's own
-	locOf    map[*tg.Client]*tg.InputDocumentFileLocation
-	mu       sync.Mutex
-	resolves map[*tg.Client]int
-	bad      map[*tg.Client]bool // sessions that cannot resolve the file
-	wrongLoc atomic.Int32        // fetches that carried another session's location
-	used     map[*tg.Client]int
-}
-
-func newMultiSessionFixture(t *testing.T, content []byte, n int) *multiSessionFixture {
-	r, _ := newTestReader(t, content, 4, 0)
-	f := &multiSessionFixture{
-		r:        r,
-		locOf:    map[*tg.Client]*tg.InputDocumentFileLocation{},
-		resolves: map[*tg.Client]int{},
-		bad:      map[*tg.Client]bool{},
-		used:     map[*tg.Client]int{},
-	}
-	f.sessions = append(f.sessions, testSessionAPI)
-	for i := 1; i < n; i++ {
-		f.sessions = append(f.sessions, &tg.Client{})
-	}
-	for i, s := range f.sessions {
-		f.locOf[s] = &tg.InputDocumentFileLocation{ID: int64(i + 1)}
-	}
-	r.locs = map[*tg.Client]tg.InputFileLocationClass{testSessionAPI: f.locOf[testSessionAPI]}
-	r.fetch = r.fetchChunk
-
-	prevResolve, prevGet, prevPick := resolveLocation, uploadGetFile, pickDownloadAPI
-	t.Cleanup(func() { resolveLocation, uploadGetFile, pickDownloadAPI = prevResolve, prevGet, prevPick })
-	resolveLocation = func(_ context.Context, api *tg.Client, _ int, _ *config.Config) (tg.InputFileLocationClass, error) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.resolves[api]++
-		if f.bad[api] {
-			return nil, errors.New("message not found")
-		}
-		return f.locOf[api], nil
-	}
-	uploadGetFile = func(_ context.Context, api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
-		f.mu.Lock()
-		f.used[api]++
-		f.mu.Unlock()
-		if req.Location != tg.InputFileLocationClass(f.locOf[api]) {
-			f.wrongLoc.Add(1)
+func TestFetchChunkFileRefOnSwitchedSessionKeepsSharedLocation(t *testing.T) {
+	r, _ := newTestReader(t, makeContent(testChunkSize), 1, 0)
+	origLoc := &tg.InputDocumentFileLocation{ID: 1}
+	altLoc := &tg.InputDocumentFileLocation{ID: 2}
+	r.loc = origLoc
+	altAPI := &tg.Client{}
+	stubSessions(t, r, altAPI, altLoc, func(api *tg.Client, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
+		if req.Location != altLoc {
 			return nil, errors.New("FILE_REFERENCE_EXPIRED")
 		}
-		end := req.Offset + int64(req.Limit)
-		if end > int64(len(content)) {
-			end = int64(len(content))
-		}
-		return &tg.UploadFile{Bytes: append([]byte(nil), content[req.Offset:end]...)}, nil
-	}
-	var next atomic.Int32
-	pickDownloadAPI = func() *tg.Client {
-		return f.sessions[int(next.Add(1))%len(f.sessions)]
-	}
-	return f
-}
+		return &tg.UploadFile{Bytes: make([]byte, req.Limit)}, nil
+	})
 
-// Prefetches rotate over several sessions; each fetch must carry the location
-// resolved for its own session, and a session is resolved at most once.
-func TestPrefetchUsesPerSessionLocations(t *testing.T) {
-	content := makeContent(10 * testChunkSize)
-	f := newMultiSessionFixture(t, content, 3)
-
-	got, err := io.ReadAll(f.r)
-	if err != nil || !bytes.Equal(got, content) {
-		t.Fatalf("content mismatch, err %v", err)
+	if _, err := r.fetchChunk(altAPI, 0, testChunkSize); err != nil {
+		t.Fatal(err)
 	}
-	f.r.waitForPrefetches()
-
-	if n := f.wrongLoc.Load(); n != 0 {
-		t.Fatalf("%d fetches carried another session's location", n)
+	if r.loc != origLoc {
+		t.Fatal("r.loc was overwritten by a location bound to another session")
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, s := range f.sessions[1:] {
-		if f.used[s] == 0 {
-			t.Error("a session was never used for prefetching")
-		}
-		if f.resolves[s] != 1 {
-			t.Errorf("resolve calls = %d, want 1 per session", f.resolves[s])
-		}
-	}
-	if f.resolves[testSessionAPI] != 0 {
-		t.Error("reader's own session was re-resolved")
-	}
-}
-
-func TestFileRefExpiredReResolvesOnlyThatSession(t *testing.T) {
-	f := newMultiSessionFixture(t, makeContent(testChunkSize), 2)
-	a, b := f.sessions[0], f.sessions[1]
-	freshB := f.locOf[b]
-	staleB := &tg.InputDocumentFileLocation{ID: 99}
-	f.r.locs[b] = staleB
-	locA := f.r.locs[a]
-
-	data, err := f.r.fetchChunk(b, 0, testChunkSize)
-	if err != nil || int64(len(data)) != testChunkSize {
-		t.Fatalf("fetchChunk = %d bytes, err %v", len(data), err)
-	}
-	if f.r.locs[b] != tg.InputFileLocationClass(freshB) {
-		t.Error("B's location was not refreshed")
-	}
-	if f.r.locs[a] != locA {
-		t.Error("A's location changed")
-	}
-	if f.resolves[a] != 0 || f.resolves[b] != 1 {
-		t.Errorf("resolves A=%d B=%d, want 0 and 1", f.resolves[a], f.resolves[b])
-	}
-}
-
-func TestPrefetchFallsBackWhenSessionCannotResolve(t *testing.T) {
-	content := makeContent(8 * testChunkSize)
-	f := newMultiSessionFixture(t, content, 3)
-	f.bad[f.sessions[1]] = true
-
-	got, err := io.ReadAll(f.r)
-	if err != nil || !bytes.Equal(got, content) {
-		t.Fatalf("content mismatch, err %v", err)
-	}
-	f.r.waitForPrefetches()
-	if f.used[f.sessions[1]] != 0 {
-		t.Error("unresolvable session was used for a fetch")
-	}
-	if f.wrongLoc.Load() != 0 {
-		t.Error("a fetch carried another session's location")
+	cacheMutex.Lock()
+	_, cached := locationCache[r.msgID]
+	cacheMutex.Unlock()
+	if cached {
+		t.Fatal("locationCache was written with another session's location")
 	}
 }
