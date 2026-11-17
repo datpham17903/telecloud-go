@@ -221,11 +221,11 @@ func (h *Handler) handleStreamSharedFile(c *gin.Context) {
 		return
 	}
 
-	if item.MimeType != nil {
-		mime := resolveEmbedMime(item)
-		if strings.HasSuffix(strings.ToLower(item.Filename), ".mkv") {
-			mime = "video/webm"
-		}
+	mime := resolveEmbedMime(item)
+	if strings.HasSuffix(strings.ToLower(item.Filename), ".mkv") {
+		mime = "video/webm"
+	}
+	if mime != "" {
 		c.Header("Content-Type", mime)
 	}
 
@@ -334,11 +334,11 @@ func (h *Handler) handleStreamSharedFileInFolder(c *gin.Context) {
 		return
 	}
 
-	if item.MimeType != nil {
-		mime := resolveEmbedMime(item)
-		if strings.HasSuffix(strings.ToLower(item.Filename), ".mkv") {
-			mime = "video/webm"
-		}
+	mime := resolveEmbedMime(item)
+	if strings.HasSuffix(strings.ToLower(item.Filename), ".mkv") {
+		mime = "video/webm"
+	}
+	if mime != "" {
 		c.Header("Content-Type", mime)
 	}
 
@@ -510,5 +510,3 @@ func (h *Handler) handleGetShares(c *gin.Context) {
 		"files": files,
 	})
 }
-
-

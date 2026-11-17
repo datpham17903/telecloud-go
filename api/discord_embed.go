@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"image"
 	_ "image/jpeg"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -133,9 +134,12 @@ func resolveEmbedMime(item database.File) string {
 }
 
 var (
-	regenerateThumb  = tgclient.RegenerateFileThumbnail
-	discordThumbWait = 7 * time.Second
-	thumbFlights     sync.Map // file ID -> *thumbFlight
+	regenerateThumb        = tgclient.RegenerateFileThumbnail
+	discordThumbWait       = 7 * time.Second
+	discordThumbRetryAfter = 10 * time.Minute
+	discordThumbSlots      = make(chan struct{}, 2) // caps concurrent regenerations
+	thumbFlights           sync.Map                 // file ID (int) -> *thumbFlight
+	thumbFailures          sync.Map                 // file ID (int) -> time.Time of last failure
 )
 
 type thumbFlight struct {
@@ -145,7 +149,8 @@ type thumbFlight struct {
 
 // ensureDiscordThumb regenerates a missing video thumbnail and waits briefly for it.
 // Concurrent callers for the same file share one regeneration. Returns nil if the
-// file is not eligible or the thumbnail is not ready in time.
+// file is not eligible, recently failed, no slot is free, or the thumbnail is not
+// ready in time.
 func (h *Handler) ensureDiscordThumb(item database.File) *string {
 	switch resolveEmbedMime(item) {
 	case "video/mp4", "video/webm", "video/quicktime":
@@ -158,25 +163,47 @@ func (h *Handler) ensureDiscordThumb(item database.File) *string {
 	if w, _ := embedDimensions(item.ThumbPath); w != 0 {
 		return nil
 	}
+	if t, ok := thumbFailures.Load(item.ID); ok && time.Since(t.(time.Time)) < discordThumbRetryAfter {
+		return nil
+	}
 
 	f := &thumbFlight{done: make(chan struct{})}
 	if existing, loaded := thumbFlights.LoadOrStore(item.ID, f); loaded {
 		f = existing.(*thumbFlight)
 	} else {
+		select {
+		case discordThumbSlots <- struct{}{}:
+		default:
+			close(f.done)
+			thumbFlights.Delete(item.ID)
+			return nil
+		}
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[Discord] thumbnail regeneration panic for file %d: %v", item.ID, r)
+					f.path = nil
+				}
+				if f.path == nil {
+					thumbFailures.Store(item.ID, time.Now())
+				}
+				close(f.done)
+				thumbFlights.Delete(item.ID)
+				<-discordThumbSlots
+			}()
 			if p, err := regenerateThumb(ctx, int64(item.ID), h.cfg); err == nil {
 				f.path = p
 			}
-			thumbFlights.Delete(item.ID)
-			close(f.done)
 		}()
 	}
+	timer := time.NewTimer(discordThumbWait)
+	defer timer.Stop()
 	select {
 	case <-f.done:
 		return f.path
-	case <-time.After(discordThumbWait):
+	case <-timer.C:
 		return nil
 	}
 }

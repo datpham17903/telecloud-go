@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"html/template"
 	"image"
 	"image/jpeg"
@@ -281,7 +282,7 @@ func TestHandleGetSharedFileDiscordThumbRegen(t *testing.T) {
 	}
 	waitIdle := func() {
 		for i := 0; i < 200; i++ {
-			if _, busy := thumbFlights.Load(int64(1)); !busy {
+			if _, busy := thumbFlights.Load(1); !busy {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -326,6 +327,68 @@ func TestHandleGetSharedFileDiscordThumbRegen(t *testing.T) {
 		waitIdle()
 		if n := atomic.LoadInt32(&calls); n != 1 {
 			t.Errorf("regenerate calls = %d, want 1", n)
+		}
+	})
+
+	t.Run("no free slot falls back without calling", func(t *testing.T) {
+		var calls int32
+		regenerateThumb = func(ctx context.Context, id int64, cfg *config.Config) (*string, error) {
+			atomic.AddInt32(&calls, 1)
+			return embedTestThumb(t, 320, 180), nil
+		}
+		discordThumbWait = 2 * time.Second
+		for i := 0; i < cap(discordThumbSlots); i++ {
+			discordThumbSlots <- struct{}{}
+		}
+		defer func() {
+			for i := 0; i < cap(discordThumbSlots); i++ {
+				<-discordThumbSlots
+			}
+		}()
+		if body := get(); body != "SHARE_PAGE" {
+			t.Errorf("body = %q, want SHARE_PAGE", body)
+		}
+		if n := atomic.LoadInt32(&calls); n != 0 {
+			t.Errorf("regenerate calls = %d, want 0", n)
+		}
+		if _, busy := thumbFlights.Load(1); busy {
+			t.Error("flight not cleaned up")
+		}
+	})
+
+	t.Run("failure is cached", func(t *testing.T) {
+		thumbFailures.Delete(1)
+		defer thumbFailures.Delete(1)
+		var calls int32
+		regenerateThumb = func(ctx context.Context, id int64, cfg *config.Config) (*string, error) {
+			atomic.AddInt32(&calls, 1)
+			return nil, errors.New("boom")
+		}
+		discordThumbWait = 2 * time.Second
+		for i := 0; i < 2; i++ {
+			if body := get(); body != "SHARE_PAGE" {
+				t.Errorf("body = %q, want SHARE_PAGE", body)
+			}
+			waitIdle()
+		}
+		if n := atomic.LoadInt32(&calls); n != 1 {
+			t.Errorf("regenerate calls = %d, want 1", n)
+		}
+	})
+
+	t.Run("panic is recovered", func(t *testing.T) {
+		thumbFailures.Delete(1)
+		defer thumbFailures.Delete(1)
+		regenerateThumb = func(ctx context.Context, id int64, cfg *config.Config) (*string, error) {
+			panic("boom")
+		}
+		discordThumbWait = 2 * time.Second
+		if body := get(); body != "SHARE_PAGE" {
+			t.Errorf("body = %q, want SHARE_PAGE", body)
+		}
+		waitIdle()
+		if len(discordThumbSlots) != 0 {
+			t.Error("slot not released")
 		}
 	})
 }
