@@ -122,7 +122,15 @@ func (h *Handler) handleGetSharedFile(c *gin.Context) {
 	}
 
 	if isDiscordBot(c.GetHeader("User-Agent")) {
-		if embed, ok := buildDiscordEmbed(item, token, getRequestOrigin(c), int64(h.cfg.DiscordEmbedMaxVideoMB)<<20); ok {
+		maxVideo := int64(h.cfg.DiscordEmbedMaxVideoMB) << 20
+		embed, ok := buildDiscordEmbed(item, token, getRequestOrigin(c), maxVideo)
+		if !ok {
+			if p := h.ensureDiscordThumb(item); p != nil {
+				item.ThumbPath = p
+				embed, ok = buildDiscordEmbed(item, token, getRequestOrigin(c), maxVideo)
+			}
+		}
+		if ok {
 			c.Render(http.StatusOK, render.HTML{Template: discordEmbedTemplate, Data: embed})
 			return
 		}
@@ -214,7 +222,7 @@ func (h *Handler) handleStreamSharedFile(c *gin.Context) {
 	}
 
 	if item.MimeType != nil {
-		mime := *item.MimeType
+		mime := resolveEmbedMime(item)
 		if strings.HasSuffix(strings.ToLower(item.Filename), ".mkv") {
 			mime = "video/webm"
 		}
@@ -327,7 +335,7 @@ func (h *Handler) handleStreamSharedFileInFolder(c *gin.Context) {
 	}
 
 	if item.MimeType != nil {
-		mime := *item.MimeType
+		mime := resolveEmbedMime(item)
 		if strings.HasSuffix(strings.ToLower(item.Filename), ".mkv") {
 			mime = "video/webm"
 		}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"html/template"
 	"image"
 	"image/jpeg"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,7 +87,15 @@ func TestBuildDiscordEmbed(t *testing.T) {
 			ImageURL: origin + "/s/tok/stream/p.png"}},
 		{"image over 10MiB", "p.jpg", "image/jpeg", 10<<20 + 1, embedTestThumb(t, 320, 240), false, discordEmbed{}},
 		{"pdf", "a.pdf", "application/pdf", 1 << 20, embedTestThumb(t, 320, 240), false, discordEmbed{}},
-		{"no mime", "clip.mp4", "", 1 << 20, embedTestThumb(t, 320, 180), false, discordEmbed{}},
+		{"no mime unknown ext", "clip.xyz", "", 1 << 20, embedTestThumb(t, 320, 180), false, discordEmbed{}},
+		{"octet-stream mp4", "a.mp4", "application/octet-stream", 10 << 20, embedTestThumb(t, 320, 180), true, discordEmbed{
+			ImageURL: origin + "/s/tok/thumb", VideoURL: origin + "/s/tok/stream/a.mp4",
+			VideoType: "video/mp4", VideoWidth: 1280, VideoHeight: 720}},
+		{"octet-stream MOV", "a.MOV", "application/octet-stream", 10 << 20, embedTestThumb(t, 320, 180), true, discordEmbed{
+			ImageURL: origin + "/s/tok/thumb", VideoURL: origin + "/s/tok/stream/a.MOV",
+			VideoType: "video/quicktime", VideoWidth: 1280, VideoHeight: 720}},
+		{"octet-stream zip", "a.zip", "application/octet-stream", 1 << 20, embedTestThumb(t, 320, 180), false, discordEmbed{}},
+		{"empty mime mp4", "clip.mp4", "", 1 << 20, embedTestThumb(t, 320, 180), true, mp4},
 		{"escaped filename", "phim hay #1?.mp4", "video/mp4", 1 << 20, embedTestThumb(t, 320, 180), true, esc},
 	}
 	for _, tc := range tests {
@@ -234,4 +245,87 @@ func TestHandleGetSharedFileDiscordEmbed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandleGetSharedFileDiscordThumbRegen(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dbPath := filepath.Join(t.TempDir(), "regen.db")
+	t.Cleanup(func() {
+		database.RWDB.Close()
+		database.RODB.Close()
+	})
+	if err := database.InitDB("sqlite", dbPath, ""); err != nil {
+		t.Fatal(err)
+	}
+	tmpl := template.Must(template.New("share.html").Parse("SHARE_PAGE"))
+	r := gin.New()
+	r.SetHTMLTemplate(tmpl)
+	h := &Handler{cfg: &config.Config{DiscordEmbedMaxVideoMB: 80}}
+	r.GET("/s/:token", h.handleGetSharedFile)
+
+	missing := filepath.Join(t.TempDir(), "gone.jpg")
+	if _, err := database.DB.Exec("INSERT INTO files (message_id, filename, path, size, mime_type, share_token, thumb_path) VALUES (1, 'clip.mp4', '/', ?, 'application/octet-stream', 'vid', ?)", 60<<20, missing); err != nil {
+		t.Fatal(err)
+	}
+
+	origRegen, origWait := regenerateThumb, discordThumbWait
+	t.Cleanup(func() { regenerateThumb, discordThumbWait = origRegen, origWait })
+
+	get := func() string {
+		req := httptest.NewRequest(http.MethodGet, "/s/vid", nil)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Discordbot/2.0)")
+		req.Header.Set("X-Forwarded-Proto", "https")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Body.String()
+	}
+	waitIdle := func() {
+		for i := 0; i < 200; i++ {
+			if _, busy := thumbFlights.Load(int64(1)); !busy {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("regeneration did not finish")
+	}
+
+	t.Run("regenerates in time", func(t *testing.T) {
+		regenerateThumb = func(ctx context.Context, id int64, cfg *config.Config) (*string, error) {
+			return embedTestThumb(t, 320, 180), nil
+		}
+		discordThumbWait = 2 * time.Second
+		body := get()
+		if !strings.Contains(body, `og:video" content="https://example.com/s/vid/stream/clip.mp4"`) {
+			t.Errorf("expected og:video, got %s", body)
+		}
+	})
+
+	t.Run("slow regeneration falls back, single flight", func(t *testing.T) {
+		var calls int32
+		regenerateThumb = func(ctx context.Context, id int64, cfg *config.Config) (*string, error) {
+			atomic.AddInt32(&calls, 1)
+			time.Sleep(400 * time.Millisecond)
+			return embedTestThumb(t, 320, 180), nil
+		}
+		discordThumbWait = 50 * time.Millisecond
+		var wg sync.WaitGroup
+		bodies := make([]string, 2)
+		for i := range bodies {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				bodies[i] = get()
+			}(i)
+		}
+		wg.Wait()
+		for _, b := range bodies {
+			if b != "SHARE_PAGE" {
+				t.Errorf("body = %q, want SHARE_PAGE", b)
+			}
+		}
+		waitIdle()
+		if n := atomic.LoadInt32(&calls); n != 1 {
+			t.Errorf("regenerate calls = %d, want 1", n)
+		}
+	})
 }

@@ -1,14 +1,19 @@
 package api
 
 import (
+	"context"
 	"html/template"
 	"image"
 	_ "image/jpeg"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"telecloud/database"
+	"telecloud/tgclient"
 )
 
 const discordEmbedMaxImageBytes int64 = 10 << 20
@@ -70,10 +75,7 @@ func embedDimensions(thumbPath *string) (int, int) {
 }
 
 func buildDiscordEmbed(item database.File, token, origin string, maxVideoBytes int64) (discordEmbed, bool) {
-	if item.MimeType == nil {
-		return discordEmbed{}, false
-	}
-	mime := strings.ToLower(*item.MimeType)
+	mime := resolveEmbedMime(item)
 	mediaURL := origin + "/s/" + token + "/stream/" + url.PathEscape(item.Filename)
 	embed := discordEmbed{
 		Title:       item.Filename,
@@ -107,4 +109,74 @@ func buildDiscordEmbed(item database.File, token, origin string, maxVideoBytes i
 
 var discordImageMimes = map[string]bool{
 	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/avif": true,
+}
+
+var embedExtMimes = map[string]string{
+	".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif",
+}
+
+// resolveEmbedMime returns the DB mime type, falling back to the file extension
+// when the stored value is empty or the generic octet-stream.
+func resolveEmbedMime(item database.File) string {
+	mime := ""
+	if item.MimeType != nil {
+		mime = strings.ToLower(*item.MimeType)
+	}
+	if mime == "" || mime == "application/octet-stream" {
+		if m, ok := embedExtMimes[strings.ToLower(filepath.Ext(item.Filename))]; ok {
+			return m
+		}
+	}
+	return mime
+}
+
+var (
+	regenerateThumb  = tgclient.RegenerateFileThumbnail
+	discordThumbWait = 7 * time.Second
+	thumbFlights     sync.Map // file ID -> *thumbFlight
+)
+
+type thumbFlight struct {
+	done chan struct{}
+	path *string
+}
+
+// ensureDiscordThumb regenerates a missing video thumbnail and waits briefly for it.
+// Concurrent callers for the same file share one regeneration. Returns nil if the
+// file is not eligible or the thumbnail is not ready in time.
+func (h *Handler) ensureDiscordThumb(item database.File) *string {
+	switch resolveEmbedMime(item) {
+	case "video/mp4", "video/webm", "video/quicktime":
+	default:
+		return nil
+	}
+	if item.Size > int64(h.cfg.DiscordEmbedMaxVideoMB)<<20 {
+		return nil
+	}
+	if w, _ := embedDimensions(item.ThumbPath); w != 0 {
+		return nil
+	}
+
+	f := &thumbFlight{done: make(chan struct{})}
+	if existing, loaded := thumbFlights.LoadOrStore(item.ID, f); loaded {
+		f = existing.(*thumbFlight)
+	} else {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if p, err := regenerateThumb(ctx, int64(item.ID), h.cfg); err == nil {
+				f.path = p
+			}
+			thumbFlights.Delete(item.ID)
+			close(f.done)
+		}()
+	}
+	select {
+	case <-f.done:
+		return f.path
+	case <-time.After(discordThumbWait):
+		return nil
+	}
 }
